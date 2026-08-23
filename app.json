@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "BT LOCKDOWN",
+    "slug": "bt-lockdown",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "btlockdown",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": false,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#050506"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.btsoftware.lockdown",
+      "infoPlist": {
+        "NSUserNotificationsUsageDescription": "BT LOCKDOWN alerts you when a Deep Work session starts and when a breach is recorded.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#050506"
+      },
+      "package": "com.btsoftware.lockdown",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.VIBRATE",
+        "android.permission.WAKE_LOCK"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-asset"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "apiBaseUrl": "https://api.btlearningsolutions.com",
+      "product": "BT LOCKDOWN",
+      "suite": "BT Software Solutions"
+    }
+  }
+}

@@ -1,0 +1,7 @@
+In TEACHING app.py:
+
+After:  import pdfgen
+Add:    from teaching_mobile import install_mobile_lockdown
+
+After:  app.secret_key = os.environ.get("SECRET_KEY", "bt-learning-demo-secret")
+Add:    install_mobile_lockdown(app)
