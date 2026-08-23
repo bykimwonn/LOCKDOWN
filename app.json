@@ -2,6 +2,7 @@
   "expo": {
     "name": "BT LOCKDOWN",
     "slug": "bt-lockdown",
+    "owner": "bingen",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
