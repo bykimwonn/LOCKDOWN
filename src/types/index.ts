@@ -20,6 +20,13 @@ export type ViolationType =
 
 export type AppCategory = 'social' | 'games' | 'entertainment' | 'browsers' | 'other';
 
+export interface DeviceBinding {
+  device_id?: string;
+  platform?: string;
+  registered_at?: string;
+  last_heartbeat?: string;
+}
+
 export interface UserProfile {
   id: string;
   name: string;
@@ -32,6 +39,7 @@ export interface UserProfile {
   longestStreak: number;
   sessionsCompleted: number;
   minutesLocked: number;
+  device?: DeviceBinding;
 }
 
 export interface DeepWorkSession {

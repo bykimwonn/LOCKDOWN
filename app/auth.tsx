@@ -16,6 +16,26 @@ export default function Auth() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  /** Render free tier sleeps; the first request can take ~50s. Time out early and retry. */
+  const withWakeRetry = async (fn: () => Promise<void>): Promise<Error | null> => {
+    const attempt = async (): Promise<Error | null> => {
+      try {
+        await fn(); // req() enforces its own 20s timeout
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e : new Error('login_failed');
+      }
+    };
+    let first = await attempt();
+    if (first && !['invalid_credentials', 'id_and_password_required', 'too_many_attempts'].includes(first.message)) {
+      // Network-level failure — probably a cold Render. Wait, then try once more.
+      await new Promise((r) => setTimeout(r, 8000));
+      const second = await attempt();
+      first = second ?? first;
+    }
+    return first;
+  };
+
   const go = async () => {
     setError('');
     if (!server.trim()) {
@@ -29,16 +49,19 @@ export default function Auth() {
     setApiBase(server);
     setBusy(true);
     try {
-      await login(ident.trim(), password);
+      const err = await withWakeRetry(() => login(ident.trim(), password));
+      if (err) throw err;
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'login_failed';
       setError(
         msg === 'invalid_credentials'
           ? 'Wrong ID or password. Use the same login as the BT LEARNING website.'
-          : msg === 'Set your BT LEARNING URL first.'
-            ? msg
-            : 'Could not reach BT LEARNING. Check the URL and that Render is awake.'
+          : msg === 'too_many_attempts'
+            ? 'Too many sign-in attempts. Wait a few minutes and try again.'
+            : msg === 'Set your BT LEARNING URL first.'
+              ? msg
+              : 'Could not reach BT LEARNING. Check the URL — if it is a Render service, it may be waking up.'
       );
     } finally {
       setBusy(false);

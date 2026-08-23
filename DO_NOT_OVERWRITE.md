@@ -221,3 +221,47 @@ On the Redmi:
 
 - **BT LEARNING URL** = `https://YOUR-TEACHING.onrender.com`
 - same student ID/email + password as the website
+
+---
+
+## 9. Phone ↔ website contract (v2 — do not overwrite this)
+
+### Time rule
+Every server time the phone receives is **explicit UTC with a `Z` suffix**
+(e.g. `2026-08-23T16:00:00Z`). Timetable block times are local wall-clock
+(TZ=Africa/Harare on Render) converted to UTC by `teaching_mobile.py`.
+The phone parses naive strings as UTC too — never as device-local.
+(Before this rule, a Harare device saw a 2-hour "clock drift" and collected
+fake clock-manipulation penalties.)
+
+### Endpoints used by the phone
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/lockdown/sync` | **primary 4s poll**: current session + timetable + user in one round-trip |
+| GET | `/api/lockdown/current` | fallback (old shape) if `/sync` returns 404 |
+| GET | `/api/lockdown/me` | profile + real stats + violations + bound device |
+| GET | `/api/lockdown/schedule` | timetable only |
+| POST | `/api/lockdown/heartbeat` | `client_time` = TRUE device UTC time (server drift check, 120s) |
+| POST | `/api/lockdown/event` | `block_attempt` / `force_quit` / `tamper_detected` |
+| POST | `/api/lockdown/complete` | `violations` = real count for the session |
+| POST | `/api/lockdown/logout` | unbind this device |
+
+### Device binding
+One device per student. `device_bindings.last_heartbeat` refreshed on
+heartbeat + login; a binding idle **14+ days** gets `401 device_expired`
+(login route stays open so the device can re-pair). Login is rate limited
+(8 attempts / 15 min per id+ip → `429 too_many_attempts`).
+
+### Phone-side enforcement (Android only in this build)
+- `modules/bt-lockdown-native` — accessibility service intercepts blocked
+  app launches (HOME + full-screen overlay barrier), `LockdownOverlayService`
+  is the foreground watchdog: polls `/current` every 5s, heartbeats every
+  20s, cleans itself up at session end even if the app is killed.
+- JS (`AppState.tsx`) keeps the 4s `/sync` loop, offline outbox for
+  violations/completion, and session-start local notifications.
+- iOS: sync works, enforcement is intentionally reported as unavailable.
+
+### Penalty numbers (client preview mirrors the server)
+blocked app: 1st = warning, 2nd = -10, 3rd+ = -25 + streak ·
+force quit / emergency unlock: -25 + streak ·
+permission revoked / clock tamper: -50 + streak.

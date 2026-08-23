@@ -1,18 +1,66 @@
 package com.btsoftware.lockdown
 
 import android.accessibilityservice.AccessibilityService
-import android.view.accessibility.AccessibilityEvent
+import android.content.ComponentName
 import android.content.Context
+import android.view.accessibility.AccessibilityEvent
 
 /**
  * Real-time launch interceptor.
  * Tuned for MIUI / Redmi: we listen to TYPE_WINDOW_STATE_CHANGED and
  * also TYPE_WINDOWS_CHANGED because some OEM launchers skip the first.
  *
- * If a blocked package comes to the foreground during an active session
- * we send the user HOME and raise the BT LOCKDOWN overlay.
+ * State machine for the full-screen barrier:
+ *  - student enters a SAFE app (BT LOCKDOWN, phone, SMS, in-call)  -> hide
+ *  - student enters a BLOCKED app (or a browser without an allowed
+ *    tab)                                                          -> HOME + show + emit
+ *  - student enters a neutral, non-blocked app                     -> hide
+ *  - launcher events (we just sent them HOME)                       -> no change
  */
 class LockdownAccessibilityService : AccessibilityService() {
+
+  private val SAFE_APPS = setOf(
+    "com.android.phone",
+    "com.google.android.dialer",
+    "com.android.incallui",
+    "com.android.systemui",
+    "com.android.settings",
+    "com.google.android.apps.messaging",
+    "com.btsoftware.learning"
+  )
+
+  private val LAUNCHERS = setOf(
+    "com.miui.home",
+    "com.miui.launcher",
+    "com.android.launcher",
+    "com.google.android.apps.nexuslauncher",
+    "com.huawei.android.launcher",
+    "com.oppo.launcher",
+    "com.sec.android.app.launcher",
+    "com.vivo.launcher"
+  )
+
+  private val BROWSERS = setOf(
+    "com.android.chrome",
+    "com.chrome.beta",
+    "com.chrome.canary",
+    "org.mozilla.firefox",
+    "org.mozilla.firefox_beta",
+    "com.microsoft.emmx",
+    "com.opera.browser",
+    "com.sec.android.app.sbrowser",
+    "com.mi.globalbrowser",
+    "com.brave.browser"
+  )
+
+  private val BROWSER_ALLOWED = listOf(
+    "bt learning",
+    "btlearning",
+    "youtube.com/watch",
+    "youtu.be/",
+    "khanacademy",
+    "coursera"
+  )
 
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
     if (event == null) return
@@ -22,52 +70,73 @@ class LockdownAccessibilityService : AccessibilityService() {
     ) return
 
     val pkg = event.packageName?.toString() ?: return
+    if (pkg == packageName) {
+      // Student is inside BT LOCKDOWN itself — safe zone.
+      LockdownOverlayService.hide(this)
+      return
+    }
+
     val prefs = getSharedPreferences("bt.lockdown", Context.MODE_PRIVATE)
     if (!prefs.getBoolean("active", false)) return
 
-    val whitelist = prefs.getString("whitelist", "")!!
+    // Launchers: we may have just sent the student HOME — keep barrier state.
+    if (pkg in LAUNCHERS) return
+
+    // Neutral app the student chose: not blocked, so let it through.
+    if (pkg in SAFE_APPS) {
+      LockdownOverlayService.hide(this)
+      return
+    }
+
+    val whitelist = (prefs.getString("whitelist", "") ?: "")
       .split(",").map { it.trim() }.filter { it.isNotEmpty() }
       .toHashSet()
-      .also {
-        it.add(packageName)
-        it.add("com.android.systemui")
-        it.add("com.miui.home")
-        it.add("com.android.phone")
-        it.add("com.google.android.dialer")
-        it.add("com.android.incallui")
-      }
+    if (pkg in whitelist) {
+      LockdownOverlayService.hide(this)
+      return
+    }
 
-    val blocked = prefs.getString("blocked", "")!!
+    // Browser with an allowed educational tab -> let it through.
+    // (Checked BEFORE the blocked set, because Chrome & co. are blocked.)
+    if (pkg in BROWSERS && browserTabAllowed(event)) {
+      LockdownOverlayService.hide(this)
+      return
+    }
+
+    val blocked = (prefs.getString("blocked", "") ?: "")
       .split(",").map { it.trim() }.filter { it.isNotEmpty() }
       .toHashSet()
 
-    val isBlocked = blocked.contains(pkg) || (!whitelist.contains(pkg) && looksLikeBrowserTab(event, pkg))
-    if (!isBlocked) return
-    if (whitelist.contains(pkg)) return
+    val isBlocked = pkg in blocked || (pkg in BROWSERS)
+    if (!isBlocked) {
+      // App is not on the shield list at all — hide any stale barrier.
+      LockdownOverlayService.hide(this)
+      return
+    }
 
-    performGlobalAction(GLOBAL_ACTION_HOME)
-    LockdownOverlayService.start(this)
+    // Blocked launch: send HOME and raise the barrier.
+    if (System.currentTimeMillis() - lastBlockAt > 2000) {
+      lastBlockAt = System.currentTimeMillis()
+      performGlobalAction(GLOBAL_ACTION_HOME)
+      LockdownOverlayService.show(this)
+      Bridge.emit("blocked", mapOf("app" to pkg))
+    }
   }
 
   override fun onInterrupt() = Unit
 
   override fun onServiceConnected() {
     super.onServiceConnected()
+    // Permission restored mid-session: nothing to do, the watchdog
+    // stops warning on its own.
   }
 
-  private fun looksLikeBrowserTab(event: AccessibilityEvent, pkg: String): Boolean {
-    val browsers = setOf(
-      "com.android.chrome",
-      "com.chrome.beta",
-      "org.mozilla.firefox",
-      "com.microsoft.emmx",
-      "com.opera.browser",
-      "com.sec.android.app.sbrowser",
-      "com.mi.globalbrowser",
-    )
-    if (!browsers.contains(pkg)) return false
+  private fun browserTabAllowed(event: AccessibilityEvent): Boolean {
     val hay = (event.text?.joinToString(" ") ?: "").lowercase()
-    val allowed = listOf("bt learning", "btlearning", "youtube.com/watch", "khanacademy", "coursera")
-    return allowed.none { hay.contains(it) }
+    return BROWSER_ALLOWED.any { hay.contains(it) }
+  }
+
+  companion object {
+    private var lastBlockAt = 0L
   }
 }
