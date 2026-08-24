@@ -54,7 +54,13 @@
     "extra": {
       "apiBaseUrl": "https://api.btlearningsolutions.com",
       "product": "BT LOCKDOWN",
-      "suite": "BT Software Solutions"
+      "suite": "BT Software Solutions",
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "6ba262dd-d81c-4184-b214-a2911dad08b0"
+      }
     }
   }
 }
