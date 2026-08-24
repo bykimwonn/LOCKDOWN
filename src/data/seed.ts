@@ -24,4 +24,8 @@ export const SHIELD_APPS: ShieldApp[] = [
   { id: 's13', name: 'Chrome', packageId: 'com.android.chrome', category: 'browsers', blocked: true, iconHint: 'CH' },
   { id: 's14', name: 'Safari', packageId: 'com.apple.mobilesafari', category: 'browsers', blocked: true, iconHint: 'SF' },
   { id: 's15', name: 'Reddit', packageId: 'com.reddit.frontpage', category: 'social', blocked: true, iconHint: 'RD' },
+  { id: 's16', name: 'Discord', packageId: 'com.discord', category: 'social', blocked: true, iconHint: 'DC' },
+  { id: 's17', name: 'Telegram', packageId: 'org.telegram.messenger', category: 'social', blocked: true, iconHint: 'TG' },
+  { id: 's18', name: 'YouTube Kids', packageId: 'com.google.android.apps.youtube.kids', category: 'entertainment', blocked: true, iconHint: 'YK' },
+  { id: 's19', name: 'Clash of Clans', packageId: 'com.supercell.clashofclans', category: 'games', blocked: true, iconHint: 'CO' },
 ];

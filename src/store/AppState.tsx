@@ -9,20 +9,28 @@ import React, {
   useRef,
 } from 'react';
 import { AppState as RNAppState, Platform } from 'react-native';
+import * as Notifications from 'expo-notifications';
 import { SHIELD_APPS } from '@/src/data/seed';
 import { getApiBase, hydrateConfig, setToken } from '@/src/config';
 import {
   completeSession,
   createManualSession,
   fetchMe,
-  fetchTimetable,
   loginToLearning,
   logoutRemote,
-  pullSyncFlag,
+  logoutDevice,
+  pullSync,
   pushHeartbeat,
   reportViolation,
+  retryComplete,
+  retryEvent,
 } from '@/src/services/api';
-import { LockdownNative } from '@/src/services/lockdownNative';
+import { clearOutbox, drainOutbox, initOutbox, setOutboxRunner } from '@/src/services/outbox';
+import { ensureNotificationPermission, scheduleSessionStarts } from '@/src/services/notifications';
+import {
+  LockdownNative,
+  type NativeLockdownEvent,
+} from '@/src/services/lockdownNative';
 import { clockSkewMs, serverNow, serverNowIso } from '@/src/services/serverTime';
 import type {
   DeepWorkSession,
@@ -36,6 +44,8 @@ import type {
 } from '@/src/types';
 
 const STORAGE_KEY = 'bt.lockdown.v2';
+const CLOCK_TAMPER_MS = 120_000; // matches the server's drift threshold
+const TAMPER_THROTTLE_MS = 10 * 60_000;
 
 type State = {
   hydrated: boolean;
@@ -50,6 +60,7 @@ type State = {
   lastSyncAt?: string;
   missedHeartbeats: number;
   apiBase: string;
+  enforcementAvailable: boolean;
 };
 
 type Action =
@@ -70,10 +81,11 @@ type Action =
   | { type: 'APPLY_PENALTY'; eloDelta: number; breakStreak: boolean }
   | { type: 'COMPLETE_SESSION'; id: string; minutes: number }
   | { type: 'HEARTBEAT'; at: string; missed?: boolean }
-  | { type: 'SET_API'; apiBase: string };
+  | { type: 'SET_API'; apiBase: string }
+  | { type: 'SET_ENFORCEMENT'; available: boolean };
 
 const defaultPerms = (): PermissionStatus => ({
-  screenTime: Platform.OS === 'ios' ? 'pending' : 'unavailable',
+  screenTime: 'unavailable',
   accessibility: Platform.OS === 'android' ? 'pending' : 'unavailable',
   overlay: Platform.OS === 'android' ? 'pending' : 'unavailable',
   notifications: 'pending',
@@ -91,6 +103,7 @@ const initial: State = {
   syncOk: false,
   missedHeartbeats: 0,
   apiBase: '',
+  enforcementAvailable: Platform.OS === 'android',
 };
 
 function reducer(state: State, action: Action): State {
@@ -110,6 +123,7 @@ function reducer(state: State, action: Action): State {
         gate: 'auth',
         shield: state.shield,
         apiBase: state.apiBase,
+        enforcementAvailable: state.enforcementAvailable,
       };
     case 'SET_PERMISSIONS':
       return { ...state, permissions: action.permissions };
@@ -163,6 +177,8 @@ function reducer(state: State, action: Action): State {
       };
     case 'SET_API':
       return { ...state, apiBase: action.apiBase };
+    case 'SET_ENFORCEMENT':
+      return { ...state, enforcementAvailable: action.available };
     default:
       return state;
   }
@@ -172,11 +188,13 @@ type Ctx = State & {
   login: (id: string, password: string) => Promise<void>;
   signOut: () => void;
   finishOnboarding: () => void;
+  refreshPermissionStatus: () => Promise<void>;
   finishPermissions: () => Promise<void>;
+  requestBatteryExemption: () => Promise<void>;
   startManualFocus: (minutes: number, title?: string) => Promise<void>;
   emergencyUnlock: () => Promise<void>;
   toggleApp: (id: string) => void;
-  recordAttempt: (appName: string) => void;
+  recordAttempt: (appLabel: string) => void;
   setGate: (gate: RouteGate) => void;
 };
 
@@ -205,11 +223,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const stateRef = useRef(state);
   stateRef.current = state;
   const backgroundedAt = useRef<number | null>(null);
+  const lastTamperAt = useRef(0);
+  const blockCounts = useRef<Map<string, number>>(new Map());
+  const sessionEvents = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     (async () => {
       await hydrateConfig();
+      await initOutbox();
+      setOutboxRunner(async (label, payload) => {
+        const p = (payload ?? {}) as Record<string, unknown>;
+        if (label === 'event') await retryEvent(p);
+        else await retryComplete(p);
+      });
       dispatch({ type: 'SET_API', apiBase: getApiBase() });
+      dispatch({
+        type: 'SET_ENFORCEMENT',
+        available: Platform.OS === 'android' ? LockdownNative.available : false,
+      });
       try {
         const raw = await AsyncStorage.getItem(STORAGE_KEY);
         const saved = raw ? (JSON.parse(raw) as Partial<State>) : {};
@@ -262,39 +293,80 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     ).catch(() => undefined);
   }, [state.hydrated, state.gate, state.shield, state.permissions]);
 
-  const punish = useCallback(
-    async (type: ViolationType, detail: string, eloDelta: number, breakStreak: boolean) => {
-      const s = stateRef.current;
-      const v = makeViolation(type, detail, s.lockdown.sessionId, eloDelta, breakStreak);
-      dispatch({ type: 'ADD_VIOLATION', violation: v });
-      dispatch({ type: 'APPLY_PENALTY', eloDelta, breakStreak });
-      const updated = await reportViolation({
-        type,
-        sessionId: s.lockdown.sessionId,
-        detail,
-        eloDelta,
-        streakBroken: breakStreak,
+  /**
+   * Local penalty preview. Numbers mirror the server so the UI tells the
+   * truth (BT LEARNING applies the real penalty on its side):
+   *  - blocked app: 1st = warning, 2nd = -10, 3rd+ = -25 + streak
+   *  - force quit / emergency unlock: -25 + streak
+   *  - permission revoked / clock tamper: -50 + streak
+   *  - heartbeat loss: local only, never scored
+   */
+  const punish = useCallback(async (type: ViolationType, detail: string) => {
+    const s = stateRef.current;
+    let eloDelta = 0;
+    let breakStreak = false;
+
+    if (type === 'blocked_app') {
+      const key = s.lockdown.sessionId || 'unknown';
+      const n = (blockCounts.current.get(key) || 0) + 1;
+      blockCounts.current.set(key, n);
+      if (n === 2) eloDelta = -10;
+      if (n >= 3) {
+        eloDelta = -25;
+        breakStreak = true;
+      }
+    } else if (type === 'force_quit' || type === 'emergency_unlock') {
+      eloDelta = -25;
+      breakStreak = true;
+    } else if (type === 'accessibility_off' || type === 'permission_revoked' || type === 'time_tamper') {
+      eloDelta = -50;
+      breakStreak = true;
+    } else if (type === 'heartbeat_miss') {
+      // local only — a network blip is not a violation
+    }
+
+    if (s.lockdown.sessionId && type !== 'heartbeat_miss') {
+      const n = (sessionEvents.current.get(s.lockdown.sessionId) || 0) + 1;
+      sessionEvents.current.set(s.lockdown.sessionId, n);
+    }
+
+    const v = makeViolation(type, detail, s.lockdown.sessionId, eloDelta, breakStreak);
+    dispatch({ type: 'ADD_VIOLATION', violation: v });
+    if (eloDelta !== 0 || breakStreak) dispatch({ type: 'APPLY_PENALTY', eloDelta, breakStreak });
+    const updated = await reportViolation({
+      type,
+      sessionId: s.lockdown.sessionId,
+      detail,
+      eloDelta,
+      streakBroken: breakStreak,
+    });
+    if (updated) dispatch({ type: 'SET_USER', user: updated });
+  }, []);
+
+  const arm = useCallback(
+    async (session: DeepWorkSession, armedBy: 'sync' | 'manual') => {
+      await LockdownNative.activate(session.id, session.endsAt, stateRef.current.shield, {
+        title: session.title,
+        subject: session.subject,
+        armedBy,
       });
-      if (updated) dispatch({ type: 'SET_USER', user: updated });
+      blockCounts.current.set(session.id, 0);
+      sessionEvents.current.set(session.id, 0);
+      dispatch({
+        type: 'SET_LOCKDOWN',
+        lockdown: {
+          active: true,
+          sessionId: session.id,
+          serverStartedAt: session.startsAt ?? serverNowIso(),
+          serverEndsAt: session.endsAt,
+          lastHeartbeatAt: serverNowIso(),
+          armedBy,
+        },
+      });
+      dispatch({ type: 'PATCH_SESSION', id: session.id, patch: { status: 'active' } });
     },
     []
   );
-
-  const arm = useCallback(async (session: DeepWorkSession, armedBy: 'sync' | 'manual') => {
-    await LockdownNative.activate(session.id, session.endsAt, stateRef.current.shield);
-    dispatch({
-      type: 'SET_LOCKDOWN',
-      lockdown: {
-        active: true,
-        sessionId: session.id,
-        serverStartedAt: serverNowIso(),
-        serverEndsAt: session.endsAt,
-        lastHeartbeatAt: serverNowIso(),
-        armedBy,
-      },
-    });
-    dispatch({ type: 'PATCH_SESSION', id: session.id, patch: { status: 'active' } });
-  }, []);
 
   const disarm = useCallback(async (outcome: 'completed' | 'abandoned' | 'failed') => {
     const s = stateRef.current;
@@ -303,11 +375,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (outcome === 'completed' && s.lockdown.serverStartedAt && s.lockdown.serverEndsAt) {
         const minutes = Math.max(
           1,
-          Math.round((Date.parse(s.lockdown.serverEndsAt) - Date.parse(s.lockdown.serverStartedAt)) / 60000)
+          Math.round(
+            (Date.parse(s.lockdown.serverEndsAt) - Date.parse(s.lockdown.serverStartedAt)) / 60000
+          )
         );
+        const violations = sessionEvents.current.get(s.lockdown.sessionId) || 0;
         dispatch({ type: 'COMPLETE_SESSION', id: s.lockdown.sessionId, minutes });
         const session = s.sessions.find((x) => x.id === s.lockdown.sessionId);
-        const updated = await completeSession(s.lockdown.sessionId, minutes, session?.subject);
+        const updated = await completeSession(s.lockdown.sessionId, violations, session?.subject);
         if (updated) dispatch({ type: 'SET_USER', user: updated });
       } else {
         dispatch({ type: 'PATCH_SESSION', id: s.lockdown.sessionId, patch: { status: outcome } });
@@ -316,31 +391,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'SET_LOCKDOWN', lockdown: { active: false, armedBy: 'none' } });
   }, []);
 
+  // ------------------------------------------------------------------
+  // 4s sync loop: one round-trip to BT LEARNING
+  // ------------------------------------------------------------------
   useEffect(() => {
     if (!state.user || state.gate !== 'app') return;
     let alive = true;
     const tick = async () => {
       const s = stateRef.current;
       try {
-        const [flag, sessions] = await Promise.all([pullSyncFlag(), fetchTimetable()]);
+        const result = await pullSync();
         if (!alive) return;
-        dispatch({ type: 'SET_SESSIONS', sessions });
-        dispatch({ type: 'SET_SYNC', ok: true, at: flag.serverNow });
-        if (flag.user) dispatch({ type: 'SET_USER', user: flag.user });
+        dispatch({ type: 'SET_SESSIONS', sessions: result.sessions });
+        dispatch({ type: 'SET_SYNC', ok: true, at: result.serverNow });
+        if (result.user) dispatch({ type: 'SET_USER', user: result.user });
+        scheduleSessionStarts(result.sessions);
+        drainOutbox().catch(() => undefined);
 
-        if (clockSkewMs() > 90_000 && s.lockdown.active) {
-          punish('time_tamper', 'Local clock drifted more than 90s from server time.', -20, false);
+        // Clock tamper — throttled, matches the server's 120s threshold
+        if (clockSkewMs() > CLOCK_TAMPER_MS && Date.now() - lastTamperAt.current > TAMPER_THROTTLE_MS) {
+          lastTamperAt.current = Date.now();
+          punish('time_tamper', 'Local clock drifted more than 2 minutes from server time.');
         }
 
-        if (flag.lockdownActive && flag.sessionId && !s.lockdown.active) {
+        if (result.lockdownActive && result.sessionId && !s.lockdown.active) {
           const session =
-            sessions.find((x) => x.id === flag.sessionId) ??
+            result.sessions.find((x) => x.id === result.sessionId) ??
             ({
-              id: flag.sessionId,
-              title: flag.title || 'Deep Work',
-              subject: flag.subject || 'Study',
-              startsAt: flag.startsAt ?? serverNowIso(),
-              endsAt: flag.endsAt ?? new Date(Date.now() + 50 * 60000).toISOString(),
+              id: result.sessionId,
+              title: result.title || 'Deep Work',
+              subject: result.subject || 'Study',
+              startsAt: result.startsAt ?? serverNowIso(),
+              endsAt: result.endsAt ?? new Date(Date.now() + 50 * 60000).toISOString(),
               status: 'active',
               source: 'timetable',
             } as DeepWorkSession);
@@ -350,17 +432,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (s.lockdown.active && s.lockdown.serverEndsAt) {
           if (serverNow().getTime() >= Date.parse(s.lockdown.serverEndsAt)) {
             await disarm('completed');
-          } else if (s.lockdown.sessionId) {
+          } else if (s.lockdown.sessionId && !LockdownNative.available) {
+            // JS heartbeat only when the native watchdog is not running
             const sess = s.sessions.find((x) => x.id === s.lockdown.sessionId);
             const beat = await pushHeartbeat(s.lockdown.sessionId, sess?.subject);
             dispatch({ type: 'HEARTBEAT', at: serverNowIso(), missed: !beat.ok });
-            if (!beat.ok && s.missedHeartbeats >= 4) {
-              punish('heartbeat_miss', 'Lost contact with BT LEARNING during a sealed session.', -12, false);
-            }
           }
         }
 
-        if (s.lockdown.active && !flag.lockdownActive && s.lockdown.armedBy === 'sync') {
+        if (s.lockdown.active && !result.lockdownActive && s.lockdown.armedBy === 'sync') {
           await disarm('completed');
         }
       } catch {
@@ -375,6 +455,50 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
   }, [state.user, state.gate, arm, disarm, punish]);
 
+  // ------------------------------------------------------------------
+  // Native enforcement events (watchdog + accessibility service)
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const unsubscribe = LockdownNative.subscribe((evt: NativeLockdownEvent) => {
+      const s = stateRef.current;
+      switch (evt.event) {
+        case 'expired':
+          if (s.lockdown.active) void disarm('completed');
+          break;
+        case 'serverInactive':
+          if (s.lockdown.active && s.lockdown.armedBy === 'sync') void disarm('completed');
+          break;
+        case 'unauthorized':
+          if (s.user) void signOutRef.current?.();
+          break;
+        case 'accessibilityOff':
+          if (s.lockdown.active) {
+            void punish(
+              'accessibility_off',
+              'The lockdown service was disabled on the device mid-session.'
+            );
+          }
+          break;
+        case 'blocked': {
+          const known = stateRef.current.shield.find((a) => a.packageId === evt.app);
+          void recordAttemptRef.current?.(known ? known.name : (evt.app || 'unknown app'));
+          break;
+        }
+        case 'heartbeatLost':
+          dispatch({ type: 'HEARTBEAT', at: serverNowIso(), missed: true });
+          break;
+        case 'overlayDenied':
+          break;
+        default:
+          break;
+      }
+    });
+    return unsubscribe;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [arm, disarm, punish]);
+
+  // Force-quit detection: the React process leaving the foreground for a
+  // long stretch during a sealed session.
   useEffect(() => {
     const sub = RNAppState.addEventListener('change', (next) => {
       const s = stateRef.current;
@@ -386,11 +510,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const away = Date.now() - backgroundedAt.current;
         backgroundedAt.current = null;
         if (away > 12_000) {
-          punish(
+          void punish(
             'force_quit',
-            `Process left the foreground for ${Math.round(away / 1000)}s during Deep Work. Treated as tamper.`,
-            -35,
-            true
+            `Process left the foreground for ${Math.round(away / 1000)}s during Deep Work. Treated as tamper.`
           );
         }
       }
@@ -406,30 +528,89 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = useCallback(() => {
     LockdownNative.deactivate();
+    void logoutDevice();
+    clearOutbox();
     logoutRemote();
     AsyncStorage.removeItem(STORAGE_KEY).catch(() => undefined);
     dispatch({ type: 'SIGN_OUT' });
   }, []);
 
+  const signOutRef = useRef<(() => void) | null>(null);
+  signOutRef.current = signOut;
+
   const finishOnboarding = useCallback(() => dispatch({ type: 'SET_GATE', gate: 'auth' }), []);
 
-  const finishPermissions = useCallback(async () => {
-    if (Platform.OS === 'ios') await LockdownNative.requestScreenTimeAuthorization();
-    if (Platform.OS === 'android') {
-      await LockdownNative.requestAccessibility();
-      await LockdownNative.requestOverlay();
+  /** Re-read the real permission state without opening any system dialog. */
+  const refreshPermissionStatus = useCallback(async () => {
+    if (Platform.OS !== 'android') {
+      dispatch({
+        type: 'SET_PERMISSIONS',
+        permissions: {
+          screenTime: 'unavailable',
+          accessibility: 'unavailable',
+          overlay: 'unavailable',
+          notifications: 'pending',
+        },
+      });
+      return;
+    }
+    const guard = await LockdownNative.getDeviceGuard().catch(() => null);
+    let notifications: 'granted' | 'denied' | 'pending' = 'pending';
+    try {
+      const p = await Notifications.getPermissionsAsync();
+      notifications = p.granted ? 'granted' : p.granted === false ? 'denied' : 'pending';
+    } catch {
+      /* keep pending */
     }
     dispatch({
       type: 'SET_PERMISSIONS',
       permissions: {
-        screenTime: Platform.OS === 'ios' ? 'granted' : 'unavailable',
-        accessibility: Platform.OS === 'android' ? 'granted' : 'unavailable',
-        overlay: Platform.OS === 'android' ? 'granted' : 'unavailable',
-        notifications: 'granted',
+        screenTime: 'unavailable',
+        accessibility: (guard?.accessibility as 'granted' | 'denied') || 'denied',
+        overlay: (guard?.overlay as 'granted' | 'denied') || 'denied',
+        notifications,
       },
     });
-    dispatch({ type: 'SET_GATE', gate: 'app' });
   }, []);
+
+  const finishPermissions = useCallback(async () => {
+    if (Platform.OS !== 'android') {
+      // iOS enforcement build is not wired yet — be honest about it.
+      dispatch({
+        type: 'SET_PERMISSIONS',
+        permissions: {
+          screenTime: 'unavailable',
+          accessibility: 'unavailable',
+          overlay: 'unavailable',
+          notifications: 'pending',
+        },
+      });
+      dispatch({ type: 'SET_ENFORCEMENT', available: false });
+      dispatch({ type: 'SET_GATE', gate: 'app' });
+      return;
+    }
+
+    await Promise.all([
+      LockdownNative.requestAccessibility().catch(() => false), // opens system sheet
+      LockdownNative.requestOverlay().catch(() => false),
+      ensureNotificationPermission().catch(() => false),
+      LockdownNative.requestBatteryExemption().catch(() => true),
+    ]);
+    const guard = await LockdownNative.getDeviceGuard().catch(() => null);
+    if (guard?.miui === 'detected') {
+      await LockdownNative.openAutostartSettings().catch(() => false);
+    }
+    // Re-read the real state (the student may have toggled and come back).
+    await refreshPermissionStatus();
+    dispatch({ type: 'SET_ENFORCEMENT', available: LockdownNative.available });
+    dispatch({ type: 'SET_GATE', gate: 'app' });
+  }, [refreshPermissionStatus]);
+
+  const requestBatteryExemption = useCallback(async () => {
+    await LockdownNative.requestBatteryExemption().catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 800));
+    await refreshPermissionStatus();
+  }, [refreshPermissionStatus]);
 
   const startManualFocus = useCallback(
     async (minutes: number, title = 'Manual Deep Work') => {
@@ -464,18 +645,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   const emergencyUnlock = useCallback(async () => {
-    await punish('emergency_unlock', 'Student invoked emergency unlock. Session voided.', -40, true);
+    await punish('emergency_unlock', 'Student invoked emergency unlock. Session voided.');
     await disarm('abandoned');
   }, [disarm, punish]);
 
-  const toggleApp = useCallback((id: string) => dispatch({ type: 'TOGGLE_APP', id }), []);
+  const toggleApp = useCallback((id: string) => {
+    dispatch({ type: 'TOGGLE_APP', id });
+    // Live-update the native shield list mid-session.
+    const next = stateRef.current.shield.map((a) => (a.id === id ? { ...a, blocked: !a.blocked } : a));
+    void LockdownNative.updateShield(next).catch(() => undefined);
+  }, []);
 
   const recordAttempt = useCallback(
-    (appName: string) => {
-      punish('blocked_app', `Intercepted launch of ${appName} during a sealed session.`, -8, false);
+    (appLabel: string) => {
+      void punish('blocked_app', `Intercepted launch of ${appLabel} during a sealed session.`);
     },
     [punish]
   );
+
+  const recordAttemptRef = useRef<((app: string) => void) | null>(null);
+  recordAttemptRef.current = recordAttempt;
 
   const setGate = useCallback((gate: RouteGate) => dispatch({ type: 'SET_GATE', gate }), []);
 
@@ -485,7 +674,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       login,
       signOut,
       finishOnboarding,
+      refreshPermissionStatus,
       finishPermissions,
+      requestBatteryExemption,
       startManualFocus,
       emergencyUnlock,
       toggleApp,
@@ -497,7 +688,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       login,
       signOut,
       finishOnboarding,
+      refreshPermissionStatus,
       finishPermissions,
+      requestBatteryExemption,
       startManualFocus,
       emergencyUnlock,
       toggleApp,

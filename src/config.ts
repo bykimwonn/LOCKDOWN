@@ -1,9 +1,22 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import Constants from 'expo-constants';
 
 const URL_KEY = 'bt.lockdown.apiBase';
 const TOKEN_KEY = 'bt.lockdown.token';
 
-let apiBase = (process.env.EXPO_PUBLIC_API_URL || '').replace(/\/$/, '');
+/**
+ * Default API base: env build-time value, else the URL baked into app.json
+ * (extra.apiBaseUrl), else whatever the user saved on this device.
+ */
+function bakedDefault(): string {
+  const fromEnv = (process.env.EXPO_PUBLIC_API_URL || '').replace(/\/$/, '');
+  if (fromEnv) return fromEnv;
+  const extra = Constants.expoConfig?.extra as Record<string, unknown> | undefined;
+  const fromExtra = String(extra?.apiBaseUrl || '').replace(/\/$/, '');
+  return fromExtra;
+}
+
+let apiBase = bakedDefault();
 let token = '';
 
 export function getApiBase() {

@@ -4,8 +4,10 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.accessibility.AccessibilityManager
 import com.facebook.react.bridge.Arguments
@@ -17,30 +19,39 @@ import com.facebook.react.bridge.ReadableMap
 
 /**
  * JS bridge for Android enforcement.
- * The actual intercept lives in [LockdownAccessibilityService].
+ * The real-time intercept lives in [LockdownAccessibilityService] and the
+ * session watchdog + full-screen barrier live in [LockdownOverlayService].
  */
 class BTLockdownModule(private val ctx: ReactApplicationContext) :
   ReactContextBaseJavaModule(ctx) {
 
   override fun getName() = "BTLockdownModule"
 
+  init {
+    Bridge.attach(ctx)
+  }
+
   @ReactMethod
   fun requestAccessibility(promise: Promise) {
-    val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    }
-    ctx.startActivity(intent)
+    try {
+      val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      }
+      ctx.startActivity(intent)
+    } catch (_: Throwable) { }
     promise.resolve(isAccessibilityEnabled())
   }
 
   @ReactMethod
   fun requestOverlay(promise: Promise) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(ctx)) {
-      val intent = Intent(
-        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-        Uri.parse("package:${ctx.packageName}")
-      ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
-      ctx.startActivity(intent)
+      try {
+        val intent = Intent(
+          Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+          Uri.parse("package:${ctx.packageName}")
+        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        ctx.startActivity(intent)
+      } catch (_: Throwable) { }
     }
     promise.resolve(
       Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(ctx)
@@ -50,6 +61,62 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
   @ReactMethod
   fun requestScreenTimeAuthorization(promise: Promise) {
     promise.resolve(false)
+  }
+
+  @ReactMethod
+  fun requestBatteryExemption(promise: Promise) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+      try {
+        val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(ctx.packageName)) {
+          val intent = Intent(
+            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            Uri.parse("package:${ctx.packageName}")
+          ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+          ctx.startActivity(intent)
+        }
+      } catch (_: Throwable) { }
+    }
+    promise.resolve(batteryIgnored())
+  }
+
+  @ReactMethod
+  fun openAutostartSettings(promise: Promise) {
+    // MIUI / Xiaomi autostart management. Not present on every OEM; best effort.
+    val candidates = listOf(
+      "com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagementActivity",
+      "com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagerActivity",
+      "com.iqoo.secure/com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"
+    )
+    for (flat in candidates) {
+      try {
+        val (pkg, cls) = flat.split("/", limit = 2)
+        val intent = Intent().apply {
+          component = ComponentName(pkg, cls)
+          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (ctx.packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY) != null) {
+          ctx.startActivity(intent)
+          promise.resolve(true)
+          return
+        }
+      } catch (_: Throwable) { }
+    }
+    promise.resolve(false)
+  }
+
+  @ReactMethod
+  fun getDeviceGuard(promise: Promise) {
+    val map = Arguments.createMap()
+    map.putString("accessibility", if (isAccessibilityEnabled()) "granted" else "denied")
+    map.putString(
+      "overlay",
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(ctx)) "granted" else "denied"
+    )
+    map.putString("battery", if (batteryIgnored()) "granted" else "denied")
+    map.putString("miui", if (isMiui()) "detected" else "none")
+    map.putString("notifications", "pending")
+    promise.resolve(map)
   }
 
   @ReactMethod
@@ -67,23 +134,43 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
 
   @ReactMethod
   fun activate(payload: ReadableMap, promise: Promise) {
-    val prefs = ctx.getSharedPreferences("bt.lockdown", Context.MODE_PRIVATE)
+    val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     val blocked = payload.getArray("blockedPackages")?.toArrayList()?.joinToString(",") ?: ""
     val white = payload.getArray("whitelistPackages")?.toArrayList()?.joinToString(",") ?: ""
+    val title = if (payload.hasKey("title")) payload.getString("title") ?: "Deep Work" else "Deep Work"
+    val subject = if (payload.hasKey("subject")) payload.getString("subject") ?: "Study" else "Study"
+    val token = if (payload.hasKey("token")) payload.getString("token") ?: "" else ""
+    val armedBy = if (payload.hasKey("armedBy")) payload.getString("armedBy") ?: "sync" else "sync"
     prefs.edit()
       .putBoolean("active", true)
       .putString("sessionId", payload.getString("sessionId"))
       .putString("endsAt", payload.getString("endsAt"))
       .putString("blocked", blocked)
       .putString("whitelist", white)
+      .putString("title", title)
+      .putString("subject", subject)
+      .putString("token", token)
+      .putString("apiBase", if (payload.hasKey("apiBase")) payload.getString("apiBase") ?: "" else "")
+      .putString("armedBy", armedBy)
+      .putLong("startedAt", System.currentTimeMillis())
       .apply()
     LockdownOverlayService.start(ctx)
     promise.resolve(true)
   }
 
   @ReactMethod
+  fun updateShield(payload: ReadableMap, promise: Promise) {
+    val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    prefs.edit()
+      .putString("blocked", payload.getArray("blockedPackages")?.toArrayList()?.joinToString(",") ?: "")
+      .putString("whitelist", payload.getArray("whitelistPackages")?.toArrayList()?.joinToString(",") ?: "")
+      .apply()
+    promise.resolve(true)
+  }
+
+  @ReactMethod
   fun deactivate(promise: Promise) {
-    ctx.getSharedPreferences("bt.lockdown", Context.MODE_PRIVATE)
+    ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .edit().putBoolean("active", false).apply()
     LockdownOverlayService.stop(ctx)
     promise.resolve(true)
@@ -91,9 +178,28 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
 
   @ReactMethod
   fun isEnforcing(promise: Promise) {
-    val active = ctx.getSharedPreferences("bt.lockdown", Context.MODE_PRIVATE)
+    val active = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .getBoolean("active", false)
     promise.resolve(active && isAccessibilityEnabled())
+  }
+
+  private fun batteryIgnored(): Boolean {
+    return try {
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) true
+      else {
+        val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+        pm.isIgnoringBatteryOptimizations(ctx.packageName)
+      }
+    } catch (_: Throwable) {
+      false
+    }
+  }
+
+  private fun isMiui(): Boolean {
+    val brand = (Build.BRAND ?: "").lowercase()
+    val manufacturer = (Build.MANUFACTURER ?: "").lowercase()
+    return brand.contains("xiaomi") || brand.contains("redmi") ||
+      manufacturer.contains("xiaomi") || manufacturer.contains("redmi")
   }
 
   private fun isAccessibilityEnabled(): Boolean {
@@ -101,5 +207,9 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     val list = am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
     val me = ComponentName(ctx, LockdownAccessibilityService::class.java).flattenToString()
     return list.any { it.resolveInfo.serviceInfo.let { s -> ComponentName(s.packageName, s.name).flattenToString() } == me }
+  }
+
+  companion object {
+    const val PREFS = "bt.lockdown"
   }
 }

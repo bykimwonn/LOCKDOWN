@@ -10,7 +10,7 @@ import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function LockdownScreen() {
-  const { lockdown, sessions, emergencyUnlock } = useApp();
+  const { lockdown, sessions, emergencyUnlock, enforcementAvailable } = useApp();
   const inset = useSafeAreaInsets();
   const [, tick] = useState(0);
   const hold = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -80,11 +80,16 @@ export default function LockdownScreen() {
         ))}
       </View>
       <View style={{ flex: 1 }} />
+      {!enforcementAvailable ? (
+        <Text style={styles.noEnforce}>
+          Preview mode: no native enforcement linked. Build the APK to seal this device.
+        </Text>
+      ) : null}
       <Pressable onPressIn={beginHold} onPressOut={endHold} style={styles.hold}>
         <View style={[styles.holdFill, { width: `${Math.min(100, (holdMs / 2800) * 100)}%` }]} />
         <Text style={styles.holdT}>Hold to request emergency unlock</Text>
       </Pressable>
-      <Text style={styles.warn}>-40 ELO  ·  streak broken  ·  session voided</Text>
+      <Text style={styles.warn}>-25 ELO  ·  streak broken  ·  session voided</Text>
       <Modal visible={confirm} transparent animationType="fade" onRequestClose={() => setConfirm(false)}>
         <View style={styles.modalBack}>
           <View style={styles.modalCard}>
@@ -157,4 +162,30 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 10,
   },
+  noEnforce: {
+    fontFamily: fonts.sans,
+    color: colors.crimson,
+    fontSize: 12,
+    textAlign: 'center',
+    marginBottom: 10,
+    lineHeight: 17,
+  },
+  modalBack: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 26,
+  },
+  modalCard: {
+    width: '100%',
+    backgroundColor: colors.bgRaised,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.lineStrong,
+    padding: 20,
+    gap: 10,
+  },
+  modalT: { fontFamily: fonts.sansBold, color: colors.ink, fontSize: 20 },
+  modalB: { fontFamily: fonts.sans, color: colors.inkMute, fontSize: 13, lineHeight: 19 },
 });
