@@ -324,6 +324,14 @@ modules/bt-lockdown-native/
 **7. Overlay permission denied**
 → On Android 14+, must grant "Display over other apps" manually in Settings → Apps → BT LOCKDOWN → Display over other apps.
 
+**8A. `expo start` / `npm run web` exits instantly with `TypeError: fetch failed`**
+→ Expo CLI's dependency check (`Check that packages match versions required by the installed Expo SDK`) tries to call Expo's API to compare your package versions. If that network call is blocked or times out, Metro never starts and the terminal just quits. Your versions already match SDK 52, so it's safe to skip that check:
+1. Create a `.env` file in the project root (already gitignored):
+   ```
+   EXPO_NO_DEPENDENCY_VALIDATION=1
+   ```
+2. Run `npx expo start` / `npm run web` again — it starts normally.
+
 **8. Clock tamper penalties when clock is correct**
 → Fixed in v2: server now sends explicit UTC with Z suffix. Make sure TEACHING repo has latest `teaching_mobile.py` and `TZ=Africa/Harare` env.
 
