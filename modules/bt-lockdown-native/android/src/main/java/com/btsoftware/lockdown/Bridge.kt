@@ -30,11 +30,11 @@ object Bridge {
     val ctx = reactContext ?: return
     if (!ctx.hasActiveCatalystInstance()) return
     try {
-      val bundle = Arguments.createBundle()
-      bundle.putString("event", event)
-      data.forEach { (k, v) -> bundle.putString(k, v?.toString()) }
+      val map = Arguments.createMap()
+      map.putString("event", event)
+      data.forEach { (k, v) -> map.putString(k, v?.toString()) }
       ctx.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-        .emit(EVENT_CHANNEL, bundle)
+        .emit(EVENT_CHANNEL, map)
     } catch (_: Throwable) {
       // bridge may be mid-teardown; enforcement keeps working regardless
     }
