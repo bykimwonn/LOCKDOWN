@@ -122,7 +122,7 @@ class LockdownOverlayService : Service() {
       textSize = 13f
       setTypeface(typeface, Typeface.BOLD)
     }
-    val spacer = View(this).apply { layoutparams = LinearLayout.LayoutParams(0, 1, 1f) }
+    val spacer = View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) }
     val pill = TextView(this).apply {
       text = "  SEALED  "
       setTextColor(Color.parseColor("#040405"))
@@ -137,7 +137,7 @@ class LockdownOverlayService : Service() {
     top.addView(pill)
     root.addView(top)
 
-    val midGap = View(this).apply { layoutparams = LinearLayout.LayoutParams(1, 1, 1f) }
+    val midGap = View(this).apply { layoutParams = LinearLayout.LayoutParams(1, 1, 1f) }
     root.addView(midGap)
 
     val subject = TextView(this).apply {
@@ -167,7 +167,7 @@ class LockdownOverlayService : Service() {
     }
     root.addView(note)
 
-    val midGap2 = View(this).apply { layoutparams = LinearLayout.LayoutParams(1, 1, 1f) }
+    val midGap2 = View(this).apply { layoutParams = LinearLayout.LayoutParams(1, 1, 1f) }
     root.addView(midGap2)
 
     val foot = TextView(this).apply {
@@ -489,7 +489,7 @@ class LockdownOverlayService : Service() {
       .let { b ->
         val launch = try {
           packageManager.getLaunchIntentForPackage(packageName)
-            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_BRING_TO_FRONT)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
         } catch (_: Throwable) { null }
         if (launch != null) {
           b.setContentIntent(
