@@ -51,6 +51,33 @@ export default function Settings() {
         ) : null}
       </Card>
 
+      <Label style={{ marginTop: 22, marginBottom: 10 }}>About</Label>
+      <Card>
+        <Row k="Name" v={user?.name ?? '—'} />
+        <Hairline />
+        <Row k="Email" v={user?.email ?? '—'} />
+        <Hairline />
+        <Row k="Handle" v={user?.handle ?? '—'} />
+        <Hairline />
+        <Row k="Student ID" v={user?.studentId ?? '—'} />
+        <Hairline />
+        <Row k="Role" v={user?.role ?? 'Student'} />
+        <Hairline />
+        <Row k="Account ID" v={user?.id ?? '—'} />
+        <Hairline />
+        <Row k="ELO" v={user ? String(user.elo) : '—'} />
+        <Hairline />
+        <Row k="Current streak" v={user ? `${user.streak} day${user.streak === 1 ? '' : 's'}` : '—'} />
+        <Hairline />
+        <Row k="Longest streak" v={user ? `${user.longestStreak} day${user.longestStreak === 1 ? '' : 's'}` : '—'} />
+        <Hairline />
+        <Row k="Sealed sessions" v={user ? String(user.sessionsCompleted) : '—'} />
+        <Hairline />
+        <Row k="Minutes locked" v={user ? String(user.minutesLocked) : '—'} />
+        <Hairline />
+        <Row k="Device" v={dev ? `${(dev.platform || 'device').toUpperCase()} ${String(dev.device_id || '').slice(0, 8)}…` : 'Not bound'} />
+      </Card>
+
       <Label style={{ marginTop: 22, marginBottom: 10 }}>Sync bridge</Label>
       <Card>
         <View style={[styles.linkRow, { borderColor: linkOk ? colors.mint : colors.crimson }]}>
