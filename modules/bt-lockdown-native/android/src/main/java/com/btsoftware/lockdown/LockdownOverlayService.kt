@@ -11,6 +11,7 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.app.admin.DevicePolicyManager
+import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -94,7 +95,38 @@ class LockdownOverlayService : Service() {
     wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
     worker = HandlerThread("bt-lockdown-watchdog").apply { start() }
     workerH = Handler(worker.looper)
-    startForeground(NOTIF_ID, buildNotification())
+    startForegroundTyped()
+  }
+
+  /**
+   * Android 14+ requires the foreground service type to be declared in the
+   * manifest AND passed to startForeground(). We use specialUse (see
+   * plugins/withBTLockdown.js): unlike dataSync it has no Android 15 six-hour
+   * cap and is allowed to start from BOOT_COMPLETED on Android 15/16, so the
+   * watchdog survives reboots and long sessions. On older Android the plain
+   * two-arg call is used (the type constant does not exist below API 34).
+   */
+  private fun startForegroundTyped() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+      startForeground(NOTIF_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+    } else {
+      startForeground(NOTIF_ID, buildNotification())
+    }
+  }
+
+  /**
+   * Android 15 (API 35): the system may call onTimeout() for time-limited FGS
+   * types (dataSync / mediaProcessing). specialUse is NOT time-limited, but
+   * having this override means a future switch back to dataSync (or an OEM
+   * compat flag) degrades gracefully instead of throwing an internal ANR
+   * exception. The method never exists/invokes below API 35.
+   */
+  override fun onTimeout(startId: Int, fgsType: Int) {
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_REMOVE)
+      else @Suppress("DEPRECATION") stopForeground(true)
+    } catch (_: Throwable) { }
+    stopSelf()
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
