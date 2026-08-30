@@ -25,7 +25,10 @@ class LockdownAdminReceiver : DeviceAdminReceiver() {
     val active = context.getSharedPreferences(LockdownOverlayService.PREFS, Context.MODE_PRIVATE)
       .getBoolean("active", false)
     if (active) {
-      NativeReporter.report(context, "tamper_detected", "Device admin removed during an active Deep Work session.")
+      NativeReporter.report(
+        context, "adminDisabled", "tamper_detected",
+        "Device admin removed during an active Deep Work session."
+      )
     }
   }
 }
