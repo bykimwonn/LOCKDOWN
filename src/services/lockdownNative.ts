@@ -7,6 +7,7 @@ type NativeLockdown = {
   requestAccessibility: () => Promise<boolean>;
   requestOverlay: () => Promise<boolean>;
   requestBatteryExemption: () => Promise<boolean>;
+  requestDeviceAdmin: () => Promise<boolean>;
   openAutostartSettings: () => Promise<boolean>;
   getPermissionStatus: () => Promise<PermissionStatus>;
   getDeviceGuard: () => Promise<DeviceGuard>;
@@ -33,6 +34,7 @@ export type DeviceGuard = {
   accessibility: 'granted' | 'denied' | 'unavailable';
   overlay: 'granted' | 'denied' | 'unavailable';
   battery: 'granted' | 'denied' | 'unavailable';
+  admin: 'granted' | 'denied' | 'unavailable';
   miui: 'detected' | 'none';
   notifications: string;
 };
@@ -44,6 +46,7 @@ export type NativeLockdownEvent = {
     | 'serverInactive'
     | 'unauthorized'
     | 'accessibilityOff'
+    | 'adminDisabled'
     | 'overlayDenied'
     | 'heartbeatLost';
   app?: string;
@@ -63,6 +66,7 @@ function defaultGuard(): DeviceGuard {
     accessibility: 'unavailable',
     overlay: 'unavailable',
     battery: 'unavailable',
+    admin: 'unavailable',
     miui: 'none',
     notifications: 'pending',
   };
@@ -100,6 +104,11 @@ export const LockdownNative = {
   async requestBatteryExemption() {
     if (LINKED?.requestBatteryExemption) return LINKED.requestBatteryExemption();
     return true; // nothing to exempt outside the real build
+  },
+
+  async requestDeviceAdmin() {
+    if (LINKED?.requestDeviceAdmin) return LINKED.requestDeviceAdmin();
+    return false; // no native layer (Expo Go / web / iOS)
   },
 
   async openAutostartSettings() {

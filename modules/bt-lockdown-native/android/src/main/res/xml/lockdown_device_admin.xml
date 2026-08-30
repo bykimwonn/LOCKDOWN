@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Device admin tripwire (Tier 1 #6).
+  No policies are claimed: BT LOCKDOWN never locks, wipes, resets
+  passwords, or disables cameras. The admin role exists only so Android
+  requires an explicit "Remove device admin" step before the app can be
+  uninstalled — and that step fires LockdownAdminReceiver.onDisabled(),
+  which is reported as tamper.
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-policies />
+</device-admin>

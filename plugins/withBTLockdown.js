@@ -18,8 +18,10 @@ function withBTLockdown(config) {
     const manifest = cfg.modResults;
     const app = AndroidConfig.Manifest.getMainApplicationOrThrow(manifest);
     if (!app.service) app.service = [];
+    if (!app.receiver) app.receiver = [];
 
     const has = (name) => app.service.some((s) => s.$['android:name'] === name);
+    const hasReceiver = (name) => app.receiver.some((r) => r.$['android:name'] === name);
 
     if (!has('com.btsoftware.lockdown.LockdownAccessibilityService')) {
       app.service.push({
@@ -52,6 +54,54 @@ function withBTLockdown(config) {
       });
     }
 
+    // Tier 1 #1: relaunch the watchdog after reboot if a session is armed.
+    if (!hasReceiver('com.btsoftware.lockdown.BootReceiver')) {
+      app.receiver.push({
+        $: {
+          'android:name': 'com.btsoftware.lockdown.BootReceiver',
+          'android:exported': 'true',
+        },
+        'intent-filter': [
+          {
+            action: [
+              { $: { 'android:name': 'android.intent.action.BOOT_COMPLETED' } },
+              { $: { 'android:name': 'android.intent.action.QUICKBOOT_POWERON' } },
+              { $: { 'android:name': 'com.htc.intent.action.QUICKBOOT_POWERON' } },
+            ],
+          },
+        ],
+      });
+    }
+
+    // Tier 1 #6: device-admin tripwire against uninstall / tampering.
+    if (!hasReceiver('com.btsoftware.lockdown.LockdownAdminReceiver')) {
+      app.receiver.push({
+        $: {
+          'android:name': 'com.btsoftware.lockdown.LockdownAdminReceiver',
+          'android:exported': 'true',
+          'android:permission': 'android.permission.BIND_DEVICE_ADMIN',
+        },
+        'intent-filter': [
+          { action: [{ $: { 'android:name': 'android.app.action.DEVICE_ADMIN_ENABLED' } }] },
+        ],
+        'meta-data': [
+          {
+            $: {
+              'android:name': 'android.app.device_admin',
+              'android:resource': '@xml/lockdown_device_admin',
+            },
+          },
+        ],
+      });
+    }
+
+    // BOOT_COMPLETED is a normal install-time permission.
+    const perms = manifest['uses-permission'] ?? [];
+    if (!perms.some((p) => p.$ && p.$['android:name'] === 'android.permission.RECEIVE_BOOT_COMPLETED')) {
+      perms.push({ $: { 'android:name': 'android.permission.RECEIVE_BOOT_COMPLETED' } });
+      manifest['uses-permission'] = perms;
+    }
+
     return cfg;
   });
 
@@ -61,6 +111,13 @@ function withBTLockdown(config) {
       items.push({
         $: { name: 'accessibility_description' },
         _: 'BT LOCKDOWN intercepts distracting apps during Deep Work sessions from BT LEARNING.',
+      });
+      cfg.modResults.resources.string = items;
+    }
+    if (!items.some((s) => s.$ && s.$.name === 'admin_description')) {
+      items.push({
+        $: { name: 'admin_description' },
+        _: 'BT LOCKDOWN prevents the session seal from being removed mid-Deep Work. It never locks, wipes, or resets your device.',
       });
       cfg.modResults.resources.string = items;
     }

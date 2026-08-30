@@ -1,6 +1,7 @@
 package com.btsoftware.lockdown
 
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -63,6 +64,34 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     promise.resolve(false)
   }
 
+  /**
+   * Ask the student to enable BT LOCKDOWN as device admin (Tier 1 #6).
+   * While admin is active the app cannot be silently uninstalled and the
+   * admin cannot be switched off without firing LockdownAdminReceiver,
+   * which reports tamper natively.
+   */
+  @ReactMethod
+  fun requestDeviceAdmin(promise: Promise) {
+    try {
+      if (isAdminActive()) {
+        promise.resolve(true)
+        return
+      }
+      val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+        putExtra(
+          DevicePolicyManager.EXTRA_DEVICE_ADMIN,
+          ComponentName(ctx, LockdownAdminReceiver::class.java)
+        )
+        putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "BT LOCKDOWN uses this only to prevent the seal being removed mid-session. It never locks or wipes your device.")
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      }
+      ctx.startActivity(intent)
+    } catch (_: Throwable) {
+      // Some OEMs hide the admin screen; enforcement works without it.
+    }
+    promise.resolve(isAdminActive())
+  }
+
   @ReactMethod
   fun requestBatteryExemption(promise: Promise) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -114,6 +143,7 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(ctx)) "granted" else "denied"
     )
     map.putString("battery", if (batteryIgnored()) "granted" else "denied")
+    map.putString("admin", if (isAdminActive()) "granted" else "denied")
     map.putString("miui", if (isMiui()) "detected" else "none")
     map.putString("notifications", "pending")
     promise.resolve(map)
@@ -153,6 +183,11 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
       .putString("apiBase", if (payload.hasKey("apiBase")) payload.getString("apiBase") ?: "" else "")
       .putString("armedBy", armedBy)
       .putLong("startedAt", System.currentTimeMillis())
+      // Fresh session: re-learn the server clock from the first tick.
+      .putLong("clockOffsetMs", 0L)
+      // Remember whether device admin was active at arm time, so the
+      // watchdog can treat a mid-session removal as tamper (Tier 1 #6).
+      .putBoolean("adminActive", isAdminActive())
       .apply()
     LockdownOverlayService.start(ctx)
     promise.resolve(true)
@@ -161,6 +196,13 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
   @ReactMethod
   fun updateShield(payload: ReadableMap, promise: Promise) {
     val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    // Defense in depth (Tier 1 #3): the Shield tab is disabled while sealed,
+    // but refuse native-level changes too — nothing may shrink the shield
+    // mid-session.
+    if (prefs.getBoolean("active", false)) {
+      promise.resolve(false)
+      return
+    }
     prefs.edit()
       .putString("blocked", payload.getArray("blockedPackages")?.toArrayList()?.joinToString(",") ?: "")
       .putString("whitelist", payload.getArray("whitelistPackages")?.toArrayList()?.joinToString(",") ?: "")
@@ -200,6 +242,15 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     val manufacturer = (Build.MANUFACTURER ?: "").lowercase()
     return brand.contains("xiaomi") || brand.contains("redmi") ||
       manufacturer.contains("xiaomi") || manufacturer.contains("redmi")
+  }
+
+  private fun isAdminActive(): Boolean {
+    return try {
+      val dpm = ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
+      dpm?.isAdminActive(ComponentName(ctx, LockdownAdminReceiver::class.java)) ?: false
+    } catch (_: Throwable) {
+      false
+    }
   }
 
   private fun isAccessibilityEnabled(): Boolean {

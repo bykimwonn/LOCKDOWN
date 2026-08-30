@@ -1,7 +1,6 @@
 package com.btsoftware.lockdown
 
 import android.accessibilityservice.AccessibilityService
-import android.content.ComponentName
 import android.content.Context
 import android.view.accessibility.AccessibilityEvent
 
@@ -119,7 +118,13 @@ class LockdownAccessibilityService : AccessibilityService() {
       lastBlockAt = System.currentTimeMillis()
       performGlobalAction(GLOBAL_ACTION_HOME)
       LockdownOverlayService.show(this)
-      Bridge.emit("blocked", mapOf("app" to pkg))
+      // Durable report: JS updates the penalty UI when alive; if the React
+      // process was force-quit the watchdog posts it natively instead of
+      // losing the violation.
+      NativeReporter.report(
+        this, "blocked", "block_attempt",
+        "Intercepted launch of $pkg during a sealed session.", pkg
+      )
     }
   }
 

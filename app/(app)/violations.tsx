@@ -13,6 +13,7 @@ const COPY: Record<ViolationType, string> = {
   time_tamper: 'Clock tamper',
   emergency_unlock: 'Emergency unlock',
   accessibility_off: 'Service disabled',
+  admin_disabled: 'Device admin removed',
   heartbeat_miss: 'Heartbeat lost',
 };
 

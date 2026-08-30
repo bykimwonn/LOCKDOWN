@@ -16,7 +16,7 @@ const CATS: { id: AppCategory | 'all'; label: string }[] = [
 ];
 
 export default function ShieldScreen() {
-  const { shield, toggleApp } = useApp();
+  const { shield, toggleApp, lockdown } = useApp();
   const inset = useSafeAreaInsets();
   const [cat, setCat] = useState<(typeof CATS)[number]['id']>('all');
   const list = useMemo(
@@ -24,6 +24,8 @@ export default function ShieldScreen() {
     [shield, cat]
   );
   const sealed = shield.filter((a) => a.blocked).length;
+  // Tier 1 #3: the shield is frozen for the duration of a sealed session.
+  const isSealed = lockdown.active;
 
   return (
     <ScrollView
@@ -35,6 +37,15 @@ export default function ShieldScreen() {
       <Text style={styles.p}>
         {sealed} apps sealed. Essential tools stay reachable. Everything else is intercepted the moment it opens.
       </Text>
+      {isSealed && (
+        <Card style={styles.lockedBanner}>
+          <Text style={styles.lockedT}>🔒 Shield locked during Deep Work</Text>
+          <Text style={styles.lockedP}>
+            Changes to the sealed-app list apply from your next session. The shield cannot be
+            weakened while a session is running.
+          </Text>
+        </Card>
+      )}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.cats}>
         {CATS.map((c) => (
           <Pressable key={c.id} onPress={() => setCat(c.id)} style={[styles.cat, cat === c.id && styles.catOn]}>
@@ -54,6 +65,7 @@ export default function ShieldScreen() {
             </View>
             <Switch
               value={app.blocked}
+              disabled={isSealed}
               onValueChange={() => toggleApp(app.id)}
               trackColor={{ false: '#2A2D36', true: colors.amber }}
               thumbColor="#fff"
@@ -88,6 +100,9 @@ const styles = StyleSheet.create({
   },
   catOn: { backgroundColor: colors.amber, borderColor: colors.amber },
   catT: { fontFamily: fonts.sansSemi, color: colors.ink, fontSize: 13 },
+  lockedBanner: { borderColor: colors.amber, borderWidth: 1, marginBottom: 14, gap: 4 },
+  lockedT: { fontFamily: fonts.sansBold, color: colors.amber, fontSize: 14 },
+  lockedP: { fontFamily: fonts.sans, color: colors.inkMute, fontSize: 12, lineHeight: 18 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   badge: {
     width: 40,

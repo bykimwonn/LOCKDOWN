@@ -96,7 +96,7 @@ export default function LockdownScreen() {
             <Label tone="amber">Penalty warning</Label>
             <Text style={styles.modalT}>Emergency unlock</Text>
             <Text style={styles.modalB}>
-              This voids the session, deducts 40 ELO, and breaks your streak in BT LEARNING.
+              This voids the session, deducts 25 ELO, and breaks your streak in BT LEARNING.
             </Text>
             <Button title="Stay sealed" onPress={() => setConfirm(false)} />
             <Button

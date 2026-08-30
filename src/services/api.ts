@@ -10,7 +10,12 @@ const LOCAL_ONLY = new Set(['heartbeat_miss']);
 function mapEventType(type: string): string {
   if (type === 'blocked_app') return 'block_attempt';
   if (type === 'force_quit' || type === 'emergency_unlock') return 'force_quit';
-  if (type === 'permission_revoked' || type === 'accessibility_off' || type === 'time_tamper') {
+  if (
+    type === 'permission_revoked' ||
+    type === 'accessibility_off' ||
+    type === 'admin_disabled' ||
+    type === 'time_tamper'
+  ) {
     return 'tamper_detected';
   }
   return 'block_attempt';
