@@ -335,6 +335,20 @@ modules/bt-lockdown-native/
 **8. Clock tamper penalties when clock is correct**
 → Fixed in v2: server now sends explicit UTC with Z suffix. Make sure TEACHING repo has latest `teaching_mobile.py` and `TZ=Africa/Harare` env.
 
+**9. EAS build fails right after**
+```
+Setting the update request headers in 'AndroidManifest.xml' to '{"expo-channel-name":"preview"}'
+Invalid manifest found at: .../android/app/src/main/AndroidManifest.xml
+```
+→ The generated `AndroidManifest.xml` is wrapped in a bogus `<root>` tag, so Expo's
+reader cannot find the `<manifest>` element. This was caused by `plugins/withBTLockdown.js`
+adding `RECEIVE_BOOT_COMPLETED` to `cfg.modResults` instead of `cfg.modResults.manifest`
+(a second element next to `<manifest>` makes the XML writer add the `<root>` wrapper).
+Fixed in the plugin, and guarded by `__tests__/withBTLockdown.test.js`. If it comes back
+after you edit the plugin, check `npx expo prebuild -p android --no-install --clean` and
+make sure the first line of `android/app/src/main/AndroidManifest.xml` is `<manifest …>`,
+not `<root>`.
+
 ---
 
 ## 11) Quick Command Cheat Sheet
