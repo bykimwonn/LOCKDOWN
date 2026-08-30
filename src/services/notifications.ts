@@ -120,7 +120,10 @@ export function scheduleSessionStarts(sessions: DeepWorkSession[]) {
       }
       for (const item of buildItems(sessions)) {
         if (mine.has(item.id)) continue;
-        const trigger = { type: Notifications.SchedulableTriggerInputTypes.DATE, date: item.when };
+        const trigger = {
+          type: Notifications.SchedulableTriggerInputTypes.DATE,
+          date: item.when,
+        } as Notifications.NotificationTriggerInput;
         await Notifications.scheduleNotificationAsync({
           identifier: item.id,
           content: {

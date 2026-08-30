@@ -25,6 +25,9 @@ class LockdownAccessibilityService : AccessibilityService() {
    * (BT LEARNING) and the BT LOCKDOWN app itself. Everything else is subject
    * to default-deny below.
    *
+   * Samsung One UI commonly renames/system-mirrors these (com.sec.myfiles,
+   * com.samsung.android.messaging, etc.), so the OEM variants are included.
+   *
    * NOTE: com.android.settings and com.android.systemui are deliberately NOT
    * here. Putting them here was the classic escape: the student opens
    * Settings to turn off the accessibility service, or pulls the notification
@@ -32,35 +35,69 @@ class LockdownAccessibilityService : AccessibilityService() {
    * are treated as a blocked launch instead.
    */
   private val SAFE_APPS = setOf(
+    // Stock / AOSP
     "com.android.phone",
     "com.google.android.dialer",
     "com.android.incallui",
     "com.google.android.apps.messaging",
+    "com.android.messaging",
+    // Samsung One UI variants
+    "com.samsung.android.messaging",
+    "com.samsung.android.dialer",
+    "com.samsung.android.contacts",
+    "com.samsung.android.incallui",
+    "com.sec.android.app.contacts",
+    "com.sec.android.app.popupconverter",
+    "com.samsung.android.app.telephonyui",
+    // BT LEARNING companion
     "com.btsoftware.learning"
   )
 
   private val LAUNCHERS = setOf(
+    // Xiaomi / MIUI / Redmi
     "com.miui.home",
     "com.miui.launcher",
+    // AOSP / Pixel
     "com.android.launcher",
     "com.google.android.apps.nexuslauncher",
-    "com.huawei.android.launcher",
-    "com.oppo.launcher",
+    // Samsung One UI
     "com.sec.android.app.launcher",
-    "com.vivo.launcher"
+    "com.samsung.android.app.launcher",
+    // Huawei / LG / Oppo / Vivo / OnePlus
+    "com.huawei.android.launcher",
+    "com.lge.launcher",
+    "com.oppo.launcher",
+    "com.vivo.launcher",
+    "com.oneplus.launcher",
+    "com.asus.launcher",
+    "com.lenovo.launcher",
+    "com.nokia.launcher",
+    // Third-party
+    "org.zwanoo.android.speedlauncher",
+    "com.teslacoilsw.launcher"
   )
 
   private val BROWSERS = setOf(
     "com.android.chrome",
     "com.chrome.beta",
     "com.chrome.canary",
+    "com.chrome.dev",
     "org.mozilla.firefox",
     "org.mozilla.firefox_beta",
+    "org.mozilla.firefox_aurora",
     "com.microsoft.emmx",
+    "com.microsoft.emmx.beta",
     "com.opera.browser",
+    "com.opera.mini.native",
     "com.sec.android.app.sbrowser",
+    "com.samsung.android.sbrowser",
     "com.mi.globalbrowser",
-    "com.brave.browser"
+    "com.brave.browser",
+    "com.duckduckgo.mobile.android",
+    "com.uc.browser",
+    "com.itscoders.dolphin",
+    "com.browser.qq",
+    "com.jamal.absbrowser"
   )
 
   private val BROWSER_ALLOWED = listOf(

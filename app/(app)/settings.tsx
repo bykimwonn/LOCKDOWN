@@ -114,6 +114,33 @@ export default function Settings() {
         ) : null}
       </Card>
 
+      <Label style={{ marginTop: 22, marginBottom: 10 }}>Device owner · kiosk</Label>
+      <Card>
+        <View style={[styles.linkRow, { borderColor: guard?.owner === 'granted' ? colors.mint : colors.crimson }]}>
+          <View style={[styles.linkDot, { backgroundColor: guard?.owner === 'granted' ? colors.mint : colors.crimson }]} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.linkT}>DEVICE OWNER {guard?.owner === 'granted' ? '· ACTIVE' : '· NOT SET'}</Text>
+            <Text style={styles.linkS}>
+              {guard?.owner === 'granted'
+                ? 'Kiosk mode is available — the app can pin the whole device and block force-stop.'
+                : 'Not a device owner. The app still seals via Accessibility + Overlay, but a student could force-stop it. Set device owner with: adb shell dpm set-device-owner com.btsoftware.lockdown/.LockdownAdminReceiver'}
+            </Text>
+          </View>
+        </View>
+        <Hairline />
+        <Row k="Kiosk (lock-task)" v={guard?.kiosk === 'granted' ? 'Pinned' : 'Off'} />
+        <Hairline />
+        <Row k="Uninstall guard" v={guard?.admin === 'granted' ? 'Active' : 'Off'} />
+      </Card>
+      {guard?.owner === 'granted' ? (
+        <Button
+          title="Enter kiosk mode now"
+          variant="mint"
+          style={{ marginTop: 12 }}
+          onPress={() => LockdownNative.enterKiosk().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+        />
+      ) : null}
+
       {!enforcementAvailable ? (
         <Card style={{ marginTop: 10 }}>
           <Text style={styles.warn}>

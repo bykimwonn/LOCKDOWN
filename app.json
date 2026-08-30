@@ -34,14 +34,19 @@
         "backgroundColor": "#050506"
       },
       "package": "com.btsoftware.lockdown",
+      "minSdkVersion": 24,
+      "compileSdkVersion": 35,
+      "targetSdkVersion": 35,
       "permissions": [
         "android.permission.INTERNET",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.VIBRATE",
         "android.permission.WAKE_LOCK",
+        "android.permission.SYSTEM_ALERT_WINDOW",
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
-        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+        "android.permission.RECEIVE_BOOT_COMPLETED"
       ]
     },
     "web": {
