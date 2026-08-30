@@ -9,8 +9,12 @@ This is the live BT LOCKDOWN phone app. It connects to your TEACHING website (BT
 ### Required software:
 1. **Node.js 18 or 20 LTS** - https://nodejs.org (check with `node -v`)
 2. **Git** - https://git-scm.com (check with `git --version`)
-3. **VS Code** or any code editor
-4. For Android testing:
+3. **JDK 17 (Temurin recommended)** - https://adoptium.net (check with `java -version`)
+   - Required for `eas build --local` and `npx expo run:android`. Gradle 8.10.2
+     (used by Expo SDK 52) **cannot run on JDK 25** — if `java -version` says 25,
+     your local build fails. See Common Issue #10.
+4. **VS Code** or any code editor
+5. For Android testing:
    - **Android Studio** + Android SDK + Emulator, OR
    - A real Android phone with **Expo Go** app (Play Store) for quick UI test, but native lockdown won't work in Expo Go — you need a dev build for full features.
    - **EAS CLI** for building APK: `npm install -g eas-cli`
@@ -352,6 +356,48 @@ If it comes back after you edit a plugin, run:
 ```bash
 npx expo prebuild -p android --no-install --clean && npm run test:manifest
 ```
+
+**10. `eas build --local` fails with `Unsupported class file major version 69`**
+→ Your terminal's default Java is **JDK 25** (class file major version 69). Expo SDK 52's
+Gradle 8.10.2 cannot run on JDK 25, so the build dies before it even compiles. This is a
+**toolchain version mismatch — nothing wrong with the app code.**
+
+Switch to **JDK 17** (what Expo SDK 52 / React Native 0.76 expects) and rebuild:
+
+```bash
+# 1. Confirm the problem — this must print 17.x, not 25.x
+java -version
+
+# 2. Find installed JDKs (GitHub Codespaces usually has several)
+ls /usr/lib/jvm
+
+# 3A. If SDKMAN is installed (default in GitHub Codespaces):
+sdk list java
+sdk install java 17.0.13-tem
+sdk use java 17.0.13-tem          # this terminal only
+sdk default java 17.0.13-tem      # every new terminal (recommended)
+
+# 3B. Or point JAVA_HOME straight at an installed JDK 17:
+export JAVA_HOME=/usr/lib/jvm/msopenjdk-17-amd64   # adjust path to your JDK 17
+export PATH="$JAVA_HOME/bin:$PATH"
+
+# 4. Verify before rebuilding
+java -version          # must show 17.x
+echo "$JAVA_HOME"      # must not be empty
+
+# 5. Kill any old Gradle daemon, then rebuild
+pkill -f gradle || true
+eas build --local --platform android
+```
+
+Shortcut to skip the whole problem: use a cloud build instead —
+`eas build --platform android --profile production` (EAS runs it in its own
+container with the correct JDK). Local builds are the only ones affected by your
+machine's Java version.
+
+Note: the `ANDROID_NDK_HOME environment variable was not specified` and `npm
+warn deprecated ...` lines earlier in the log are harmless — ignore them. The
+build only fails because of the Java version.
 
 ---
 
