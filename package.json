@@ -9,7 +9,9 @@
     "ios": "expo run:ios",
     "web": "expo start --web --port 8081 --host lan",
     "prebuild": "expo prebuild",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "jest",
+    "test:contract": "node scripts/check-contract.mjs"
   },
   "dependencies": {
     "@expo-google-fonts/jetbrains-mono": "^0.2.3",
@@ -42,7 +44,21 @@
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
+    "@types/jest": "^30.0.0",
     "@types/react": "~18.3.12",
+    "jest-expo": "~52.0.0",
     "typescript": "~5.3.3"
+  },
+  "jest": {
+    "preset": "jest-expo",
+    "setupFiles": [
+      "<rootDir>/jest.setup.js"
+    ],
+    "moduleNameMapper": {
+      "^@/(.*)$": "<rootDir>/$1"
+    },
+    "transformIgnorePatterns": [
+      "node_modules/(?!((jest-)?react-native|@react-native(-community)?|@react-navigation/.*|expo(nent)?|@expo(nent)?/.*|@expo-google-fonts/.*|react-navigation|@unimodules/.*|unimodules|sentry-expo|native-base|react-native-svg|lucide-react-native))/"
+    ]
   }
 }

@@ -10,12 +10,14 @@ import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
+import android.app.admin.DevicePolicyManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -55,6 +57,33 @@ class LockdownOverlayService : Service() {
   private var lastA11yWarnAt = 0L
   private var lastHeartLostAt = 0L
   private var lastUnauthorizedAt = 0L
+  private var lastAdminWarnAt = 0L
+
+  // Adaptive watchdog interval: 5s while the server answers, backing off
+  // to 10/20/30s on repeated failures (Tier 2). Resets on the next success.
+  private val watchdogInterval: Long
+    get() = when {
+      netFailCount >= 4 -> 30_000L
+      netFailCount >= 2 -> 20_000L
+      netFailCount >= 1 -> 10_000L
+      else -> 5_000L
+    }
+
+  /**
+   * Server clock anchor (Tier 1 #2). offsetMs = serverTime - deviceWallClock,
+   * refreshed on every watchdog tick. All end-of-session math goes through
+   * serverNowMillis(), so a student rewinding the device clock can no longer
+   * extend the barrier countdown or delay local expiry.
+   */
+  private fun serverNowMillis(): Long =
+    System.currentTimeMillis() + prefs.getLong("clockOffsetMs", 0L)
+
+  private fun applyServerClock(iso: String) {
+    val t = parseIso(iso)
+    if (t == 0L) return
+    val offset = t - System.currentTimeMillis()
+    prefs.edit().putLong("clockOffsetMs", offset).apply()
+  }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -246,7 +275,8 @@ class LockdownOverlayService : Service() {
   private fun updateCountdown() {
     val endsAt = prefs.getString("endsAt", "") ?: ""
     val t = parseIso(endsAt)
-    val ms = if (t == 0L) 0L else (t - System.currentTimeMillis()).coerceAtLeast(0L)
+    // Server-anchored clock: a rewound device clock cannot buy extra time.
+    val ms = if (t == 0L) 0L else (t - serverNowMillis()).coerceAtLeast(0L)
     val total = ms / 1000
     val h = total / 3600
     val m = (total % 3600) / 60
@@ -261,7 +291,7 @@ class LockdownOverlayService : Service() {
   private val watchdog = object : Runnable {
     override fun run() {
       try { tickWatchdog() } catch (_: Throwable) { }
-      if (prefs.getBoolean("active", false)) workerH.postDelayed(this, 5000)
+      if (prefs.getBoolean("active", false)) workerH.postDelayed(this, watchdogInterval)
     }
   }
 
@@ -274,9 +304,10 @@ class LockdownOverlayService : Service() {
     val active = prefs.getBoolean("active", false)
     if (!active) return
 
-    // 1. Local expiry
+    // 1. Local expiry — compared against the SERVER-anchored clock so a
+    //    device clock rewind cannot postpone it.
     val endsAt = parseIso(prefs.getString("endsAt", "") ?: "")
-    if (endsAt > 0L && System.currentTimeMillis() >= endsAt) {
+    if (endsAt > 0L && serverNowMillis() >= endsAt) {
       selfCleanup("expired")
       return
     }
@@ -285,24 +316,29 @@ class LockdownOverlayService : Service() {
     val token = prefs.getString("token", "") ?: ""
     val sessionId = prefs.getString("sessionId", "") ?: ""
 
+    // Flush any violation events queued while JS was dead (force-quit / reboot).
+    if (apiBase.isNotEmpty() && token.isNotEmpty()) {
+      NativeReporter.flush(this@LockdownOverlayService, apiBase, token)
+    }
+
     // 2. Server check
     if (apiBase.isNotEmpty() && token.isNotEmpty()) {
       val res = httpGet("$apiBase/api/lockdown/current", token)
       when {
         res == null -> {
           netFailCount++
-          if (netFailCount >= 5 && System.currentTimeMillis() - lastHeartLostAt > 5 * 60000) {
-            lastHeartLostAt = System.currentTimeMillis()
+          if (netFailCount >= 5 && SystemClock.elapsedRealtime() - lastHeartLostAt > 5 * 60000) {
+            lastHeartLostAt = SystemClock.elapsedRealtime()
             Bridge.emit("heartbeatLost")
           }
         }
         res.status == 401 || res.status == 403 -> {
-          if (System.currentTimeMillis() - lastUnauthorizedAt > 30000) {
-            lastUnauthorizedAt = System.currentTimeMillis()
+          if (SystemClock.elapsedRealtime() - lastUnauthorizedAt > 30000) {
+            lastUnauthorizedAt = SystemClock.elapsedRealtime()
             Bridge.emit("unauthorized")
           }
           if (!Bridge.jsAlive() && (firstServerInactiveAt == 0L ||
-              System.currentTimeMillis() - firstServerInactiveAt > GRACE_MS)) {
+              SystemClock.elapsedRealtime() - firstServerInactiveAt > GRACE_MS)) {
             selfCleanup("unauthorized")
           }
           return
@@ -319,11 +355,11 @@ class LockdownOverlayService : Service() {
             }
             val serverActive = body.optBoolean("active", false)
             if (!serverActive) {
-              if (firstServerInactiveAt == 0L) firstServerInactiveAt = System.currentTimeMillis()
+              if (firstServerInactiveAt == 0L) firstServerInactiveAt = SystemClock.elapsedRealtime()
               hideOverlay()
               Bridge.emit("serverInactive")
               // JS should disarm now. If it never comes back, clean up after a grace period.
-              if (!Bridge.jsAlive() && System.currentTimeMillis() - firstServerInactiveAt > GRACE_MS) {
+              if (!Bridge.jsAlive() && SystemClock.elapsedRealtime() - firstServerInactiveAt > GRACE_MS) {
                 selfCleanup("serverInactive")
                 return
               }
@@ -334,9 +370,12 @@ class LockdownOverlayService : Service() {
         }
       }
 
-      // 3. Heartbeat every 20s
-      if (System.currentTimeMillis() - lastHeartbeatAt > 20000 && sessionId.isNotEmpty()) {
-        lastHeartbeatAt = System.currentTimeMillis()
+      // 3. Heartbeat every 20s. Intervals use elapsedRealtime so wall-clock
+      //    changes (student rewinding time) cannot slow the heartbeat cadence.
+      //    client_time is the TRUE device wall clock — the server compares it
+      //    against its own UTC clock to detect manipulation.
+      if (SystemClock.elapsedRealtime() - lastHeartbeatAt > 20000 && sessionId.isNotEmpty()) {
+        lastHeartbeatAt = SystemClock.elapsedRealtime()
         httpPost(
           "$apiBase/api/lockdown/heartbeat", token,
           """{"session_id":"$sessionId","client_time":"${nowIsoUtc()}"}"""
@@ -344,8 +383,8 @@ class LockdownOverlayService : Service() {
       }
     }
 
-    // 4. Accessibility permission watchdog (every 15s)
-    if (System.currentTimeMillis() - lastA11yWarnAt > 10 * 60000) {
+    // 4. Accessibility permission watchdog (throttled ~60s between reports)
+    if (SystemClock.elapsedRealtime() - lastA11yWarnAt > 60_000) {
       val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
       val list = am.getEnabledAccessibilityServiceList(
         android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK
@@ -357,14 +396,32 @@ class LockdownOverlayService : Service() {
         } == me
       }
       if (!on) {
-        lastA11yWarnAt = System.currentTimeMillis()
-        Bridge.emit("accessibilityOff")
+        lastA11yWarnAt = SystemClock.elapsedRealtime()
+        // Durable: recorded even if JS was force-quit.
+        NativeReporter.report(
+          this, "accessibilityOff", "tamper_detected",
+          "The accessibility (seal) service was switched off during a sealed session."
+        )
       }
     }
-  }
 
-  private fun applyServerClock(iso: String) {
-    // Kept for future use: watchdog currently trusts device clock + server end_time.
+    // 5. Device-admin tripwire (Tier 1 #6): if the admin was granted at
+    //    activation, it must still be set. Removing it mid-session is tamper.
+    val adminWasActive = prefs.getBoolean("adminActive", false)
+    if (adminWasActive && SystemClock.elapsedRealtime() - lastAdminWarnAt > 60_000) {
+      val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
+      val adminStill = dpm?.isAdminActive(
+        android.content.ComponentName(this, LockdownAdminReceiver::class.java)
+      ) ?: false
+      if (!adminStill) {
+        lastAdminWarnAt = SystemClock.elapsedRealtime()
+        prefs.edit().putBoolean("adminActive", false).apply()
+        NativeReporter.report(
+          this, "adminDisabled", "tamper_detected",
+          "Device admin was removed during a sealed Deep Work session."
+        )
+      }
+    }
   }
 
   /** Called by JS on disarm (session completed / abandoned / sign-out). */

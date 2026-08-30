@@ -26,6 +26,7 @@ import {
   retryEvent,
 } from '@/src/services/api';
 import { clearOutbox, drainOutbox, initOutbox, setOutboxRunner } from '@/src/services/outbox';
+import { penaltyFor } from '@/src/services/penalties';
 import { ensureNotificationPermission, scheduleSessionStarts } from '@/src/services/notifications';
 import {
   LockdownNative,
@@ -303,29 +304,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
    */
   const punish = useCallback(async (type: ViolationType, detail: string) => {
     const s = stateRef.current;
-    let eloDelta = 0;
-    let breakStreak = false;
 
+    // Count blocked-app attempts per session; other types are flat penalties.
+    let blockCount = 1;
     if (type === 'blocked_app') {
       const key = s.lockdown.sessionId || 'unknown';
-      const n = (blockCounts.current.get(key) || 0) + 1;
-      blockCounts.current.set(key, n);
-      if (n === 2) eloDelta = -10;
-      if (n >= 3) {
-        eloDelta = -25;
-        breakStreak = true;
-      }
-    } else if (type === 'force_quit' || type === 'emergency_unlock') {
-      eloDelta = -25;
-      breakStreak = true;
-    } else if (type === 'accessibility_off' || type === 'permission_revoked' || type === 'time_tamper') {
-      eloDelta = -50;
-      breakStreak = true;
-    } else if (type === 'heartbeat_miss') {
-      // local only — a network blip is not a violation
+      blockCount = (blockCounts.current.get(key) || 0) + 1;
+      blockCounts.current.set(key, blockCount);
     }
 
-    if (s.lockdown.sessionId && type !== 'heartbeat_miss') {
+    const { eloDelta, breakStreak, scored } = penaltyFor(type, blockCount);
+
+    if (s.lockdown.sessionId && scored) {
       const n = (sessionEvents.current.get(s.lockdown.sessionId) || 0) + 1;
       sessionEvents.current.set(s.lockdown.sessionId, n);
     }
@@ -392,16 +382,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // ------------------------------------------------------------------
-  // 4s sync loop: one round-trip to BT LEARNING
+  // Sync loop: one round-trip to BT LEARNING. 4s when the server is
+  // healthy, backing off to 8/15/30s (+jitter) on repeated failures so a
+  // cold-starting Render free tier (and the battery) aren't hammered.
   // ------------------------------------------------------------------
   useEffect(() => {
     if (!state.user || state.gate !== 'app') return;
     let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+
+    const backoffMs = () => {
+      const base = failures >= 4 ? 30_000 : failures >= 2 ? 15_000 : failures === 1 ? 8_000 : 4_000;
+      const jitter = Math.floor(Math.random() * 1500);
+      return base + jitter;
+    };
+
     const tick = async () => {
       const s = stateRef.current;
       try {
         const result = await pullSync();
         if (!alive) return;
+        failures = 0;
         dispatch({ type: 'SET_SESSIONS', sessions: result.sessions });
         dispatch({ type: 'SET_SYNC', ok: true, at: result.serverNow });
         if (result.user) dispatch({ type: 'SET_USER', user: result.user });
@@ -444,14 +446,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           await disarm('completed');
         }
       } catch {
+        failures += 1;
         dispatch({ type: 'SET_SYNC', ok: false, at: serverNowIso() });
       }
+      if (alive) timer = setTimeout(tick, backoffMs());
     };
     tick();
-    const id = setInterval(tick, 4000);
     return () => {
       alive = false;
-      clearInterval(id);
+      if (timer) clearTimeout(timer);
     };
   }, [state.user, state.gate, arm, disarm, punish]);
 
@@ -476,6 +479,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             void punish(
               'accessibility_off',
               'The lockdown service was disabled on the device mid-session.'
+            );
+          }
+          break;
+        case 'adminDisabled':
+          if (s.lockdown.active) {
+            void punish(
+              'admin_disabled',
+              'Device admin was removed during a sealed session — treated as tamper.'
             );
           }
           break;
@@ -595,6 +606,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       LockdownNative.requestOverlay().catch(() => false),
       ensureNotificationPermission().catch(() => false),
       LockdownNative.requestBatteryExemption().catch(() => true),
+      // Device-admin tripwire (Tier 1 #6): blocks silent uninstall and
+      // makes removal of the seal mid-session a reported tamper. Best
+      // effort — the seal works without it if the student declines.
+      LockdownNative.requestDeviceAdmin().catch(() => false),
     ]);
     const guard = await LockdownNative.getDeviceGuard().catch(() => null);
     if (guard?.miui === 'detected') {
@@ -650,8 +665,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [disarm, punish]);
 
   const toggleApp = useCallback((id: string) => {
+    // Tier 1 #3: the shield is frozen while a session is sealed — a student
+    // could otherwise switch WhatsApp off from the Shield tab and walk
+    // straight through the barrier. Changes apply from the next session.
+    // The native side rejects updateShield while active too (defense in
+    // depth).
+    if (stateRef.current.lockdown.active) return;
     dispatch({ type: 'TOGGLE_APP', id });
-    // Live-update the native shield list mid-session.
+    // Live-update the native shield list.
     const next = stateRef.current.shield.map((a) => (a.id === id ? { ...a, blocked: !a.blocked } : a));
     void LockdownNative.updateShield(next).catch(() => undefined);
   }, []);

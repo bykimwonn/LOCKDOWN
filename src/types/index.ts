@@ -16,6 +16,7 @@ export type ViolationType =
   | 'time_tamper'
   | 'emergency_unlock'
   | 'accessibility_off'
+  | 'admin_disabled'
   | 'heartbeat_miss';
 
 export type AppCategory = 'social' | 'games' | 'entertainment' | 'browsers' | 'other';
