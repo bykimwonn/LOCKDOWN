@@ -335,6 +335,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const arm = useCallback(
     async (session: DeepWorkSession, armedBy: 'sync' | 'manual') => {
+      // Pre-flight: never arm a session the phone cannot actually enforce.
+      // The Accessibility service is what intercepts launches, and the Overlay
+      // permission is what makes the full-screen seal possible. If either is
+      // missing, arming just records a fake "active" state while the student
+      // can open anything. Refuse, route to the permissions screen, and let the
+      // caller surface the message.
+      const ready = await LockdownNative.getDeviceGuard().catch(() => null);
+      if (ready && (ready.accessibility !== 'granted' || ready.overlay !== 'granted')) {
+        dispatch({ type: 'SET_ENFORCEMENT', available: LockdownNative.available });
+        dispatch({ type: 'SET_GATE', gate: 'permissions' });
+        return;
+      }
       await LockdownNative.activate(session.id, session.endsAt, stateRef.current.shield, {
         title: session.title,
         subject: session.subject,

@@ -171,6 +171,16 @@ class LockdownOverlayService : Service() {
       setBackgroundColor(Color.parseColor("#040405"))
       setPadding(dp(24), dp(40), dp(24), dp(36))
       setOnTouchListener { _, _ -> true } // swallow every touch
+      // Hide the status bar + gesture nav while sealed so a student cannot
+      // pull the notification shade / recents over the barrier to reach
+      // Settings and disable accessibility. FLAG_SECURE also blocks
+      // screenshots / screen-recording of the seal.
+      systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        or View.SYSTEM_UI_FLAG_FULLSCREEN
+        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
     }
 
     val top = LinearLayout(this).apply {
@@ -246,7 +256,9 @@ class LockdownOverlayService : Service() {
       WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
         or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-        or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+        or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        or WindowManager.LayoutParams.FLAG_SECURE
+        or WindowManager.LayoutParams.FLAG_FULLSCREEN,
       PixelFormat.OPAQUE
     ).apply {
       gravity = Gravity.TOP or Gravity.START
@@ -434,6 +446,12 @@ class LockdownOverlayService : Service() {
           this, "accessibilityOff", "tamper_detected",
           "The accessibility (seal) service was switched off during a sealed session."
         )
+        // HARD-FALLBACK: without the accessibility service we cannot tell a
+        // safe app from a blocked one, so the only safe decision is to lock
+        // the whole phone. Raise the full-screen seal and keep it there until
+        // the session ends. This turns "switch off accessibility" into a
+        // fully-locked device instead of a free pass.
+        main.post { if (overlay == null) showOverlay() }
       }
     }
 

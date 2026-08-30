@@ -81,6 +81,23 @@ function defaultGuard(): DeviceGuard {
  *   instead of pretending.
  * - iOS: Family Controls build not wired yet — treated as unsupported.
  */
+/**
+ * Essential packages that always stay reachable while a session is sealed,
+ * plus the set of shield apps the teacher left UNBLOCKED. The native
+ * enforcement is default-deny: only this whitelist (+ the hard-allow system
+ * apps like phone / SMS / in-call baked into the accessibility service) gets
+ * through. Any app not on the shield at all, or that the teacher has marked
+ * blocked, is intercepted — that is the "system level" lock.
+ */
+const essentialWhitelist = [
+  'com.btsoftware.lockdown',
+  'com.btsoftware.learning',
+  'com.apple.mobilephone',
+  'com.apple.MobileSMS',
+  'com.android.dialer',
+  'com.google.android.apps.messaging',
+];
+
 export const LockdownNative = {
   get available(): boolean {
     return Platform.OS === 'android' && Boolean(LINKED?.activate);
@@ -133,14 +150,9 @@ export const LockdownNative = {
     meta?: { title?: string; subject?: string; armedBy?: string }
   ) {
     const blocked = apps.filter((a) => a.blocked).map((a) => a.packageId);
-    const whitelist = [
-      'com.btsoftware.lockdown',
-      'com.btsoftware.learning',
-      'com.apple.mobilephone',
-      'com.apple.MobileSMS',
-      'com.android.dialer',
-      'com.google.android.apps.messaging',
-    ];
+    // Every app the teacher left unblocked is an allowed study app.
+    const allowed = apps.filter((a) => !a.blocked).map((a) => a.packageId);
+    const whitelist = Array.from(new Set([...essentialWhitelist, ...allowed]));
     if (LINKED?.activate) {
       return LINKED.activate({
         sessionId,
@@ -159,12 +171,8 @@ export const LockdownNative = {
 
   async updateShield(apps: ShieldApp[]) {
     const blocked = apps.filter((a) => a.blocked).map((a) => a.packageId);
-    const whitelist = [
-      'com.btsoftware.lockdown',
-      'com.btsoftware.learning',
-      'com.android.dialer',
-      'com.google.android.apps.messaging',
-    ];
+    const allowed = apps.filter((a) => !a.blocked).map((a) => a.packageId);
+    const whitelist = Array.from(new Set([...essentialWhitelist, ...allowed]));
     if (LINKED?.updateShield) {
       return LINKED.updateShield({ blockedPackages: blocked, whitelistPackages: whitelist });
     }
