@@ -8,8 +8,10 @@ on:
 
 jobs:
   verify:
-    name: Typecheck, tests, contract
+    name: Typecheck, tests, contract, manifest
     runs-on: ubuntu-latest
+    env:
+      EXPO_NO_TELEMETRY: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -29,3 +31,12 @@ jobs:
 
       - name: Phone/server contract check
         run: npm run test:contract
+
+      # Guards the whole config-plugin chain end to end. A plugin that writes outside
+      # <manifest> yields a file EAS only rejects much later, deep in the expo-updates
+      # channel step, with "Invalid manifest found at: .../AndroidManifest.xml".
+      # Needs network to download Expo's bare template on a cold ~/.expo cache.
+      - name: Generated AndroidManifest check
+        run: |
+          npx expo prebuild -p android --no-install --clean
+          npm run test:manifest

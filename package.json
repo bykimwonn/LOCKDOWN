@@ -11,7 +11,8 @@
     "prebuild": "expo prebuild",
     "lint": "tsc --noEmit",
     "test": "jest",
-    "test:contract": "node scripts/check-contract.mjs"
+    "test:contract": "node scripts/check-contract.mjs",
+    "test:manifest": "node scripts/check-android-manifest.mjs"
   },
   "dependencies": {
     "@expo-google-fonts/jetbrains-mono": "^0.2.3",

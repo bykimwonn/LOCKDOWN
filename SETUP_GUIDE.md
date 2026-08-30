@@ -344,10 +344,14 @@ Invalid manifest found at: .../android/app/src/main/AndroidManifest.xml
 reader cannot find the `<manifest>` element. This was caused by `plugins/withBTLockdown.js`
 adding `RECEIVE_BOOT_COMPLETED` to `cfg.modResults` instead of `cfg.modResults.manifest`
 (a second element next to `<manifest>` makes the XML writer add the `<root>` wrapper).
-Fixed in the plugin, and guarded by `__tests__/withBTLockdown.test.js`. If it comes back
-after you edit the plugin, check `npx expo prebuild -p android --no-install --clean` and
-make sure the first line of `android/app/src/main/AndroidManifest.xml` is `<manifest …>`,
-not `<root>`.
+Fixed in the plugin, and guarded twice: `__tests__/withBTLockdown.test.js` (the mod in
+isolation) and `npm run test:manifest` (the generated file, i.e. every plugin together).
+Both run in CI — `.github/workflows/ci.yml`, kept identical to `.ci-template/ci.yml`.
+If it comes back after you edit a plugin, run:
+
+```bash
+npx expo prebuild -p android --no-install --clean && npm run test:manifest
+```
 
 ---
 
@@ -366,6 +370,10 @@ npm run android          # full native test (needs Android Studio)
 
 # Checks
 npm run lint             # tsc --noEmit
+npm test                 # unit tests (+ config-plugin manifest tests)
+npm run test:contract    # phone <-> TEACHING route shapes
+# AndroidManifest exactly as the EAS build step will read it:
+npx expo prebuild -p android --no-install --clean && npm run test:manifest
 
 # Build
 eas login
