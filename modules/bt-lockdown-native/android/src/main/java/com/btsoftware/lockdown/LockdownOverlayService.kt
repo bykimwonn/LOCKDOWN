@@ -246,12 +246,45 @@ class LockdownOverlayService : Service() {
     root.addView(countText)
 
     val note = TextView(this).apply {
-      text = "This phone is sealed until the session ends.\nReturn to BT LOCKDOWN to continue studying."
+      text = "This phone is sealed until the session ends.\nTap below to return to BT LOCKDOWN."
       setTextColor(Color.parseColor("#8A8A93"))
       textSize = 14f
       gravity = Gravity.CENTER
     }
     root.addView(note)
+
+    // A real, always-reachable return path. The barrier is touch-modal, so the
+    // student can no longer tap the launcher to get back to the app; this is the
+    // one way in. Launching our own package is always allowed (it is the safe
+    // zone in the accessibility service).
+    val returnBtn = TextView(this).apply {
+      text = "OPEN BT LOCKDOWN"
+      setTextColor(Color.parseColor("#0A0A0B"))
+      setBackgroundColor(Color.parseColor("#FF7A15"))
+      textSize = 15f
+      setTypeface(typeface, Typeface.BOLD)
+      gravity = Gravity.CENTER
+      isClickable = true
+      setPadding(dp(22), dp(12), dp(22), dp(12))
+      setOnClickListener {
+        try {
+          val launch = packageManager.getLaunchIntentForPackage(packageName)
+            ?.addFlags(
+              Intent.FLAG_ACTIVITY_NEW_TASK
+                or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            )
+          if (launch != null) startActivity(launch)
+        } catch (_: Throwable) { }
+      }
+    }
+    val btnHolder = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER
+      setPadding(0, dp(6), 0, 0)
+    }
+    btnHolder.addView(returnBtn)
+    root.addView(btnHolder)
 
     val midGap2 = View(this).apply { layoutParams = LinearLayout.LayoutParams(1, 1, 1f) }
     root.addView(midGap2)
@@ -270,7 +303,6 @@ class LockdownOverlayService : Service() {
       overlayType(),
       WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
         or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
         or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
         or WindowManager.LayoutParams.FLAG_SECURE
         or WindowManager.LayoutParams.FLAG_FULLSCREEN,
