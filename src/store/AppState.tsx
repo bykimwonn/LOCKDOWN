@@ -601,17 +601,59 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    await Promise.all([
-      LockdownNative.requestAccessibility().catch(() => false), // opens system sheet
-      LockdownNative.requestOverlay().catch(() => false),
-      ensureNotificationPermission().catch(() => false),
-      LockdownNative.requestBatteryExemption().catch(() => true),
-      // Device-admin tripwire (Tier 1 #6): blocks silent uninstall and
-      // makes removal of the seal mid-session a reported tamper. Best
-      // effort — the seal works without it if the student declines.
-      LockdownNative.requestDeviceAdmin().catch(() => false),
-    ]);
-    const guard = await LockdownNative.getDeviceGuard().catch(() => null);
+    // Open the system dialogs ONE AT A TIME and wait for the student to
+    // actually grant each before moving on. Firing all five at once makes
+    // Android show only one (or none) — which is exactly why the Device
+    // Admin / phone-admin prompt was never seen and the Accessibility
+    // service was left off, so the barrier never appeared. Reading
+    // getDeviceGuard() immediately also recorded "denied" before the
+    // student had a chance to toggle anything.
+    const guardValue = () =>
+      LockdownNative.getDeviceGuard().catch(() => null).then((g) => g ?? null);
+    const waitFor = async (
+      check: (g: Awaited<ReturnType<typeof guardValue>>) => boolean,
+      timeoutMs = 90_000
+    ): Promise<boolean> => {
+      const start = Date.now();
+      return new Promise((resolve) => {
+        const poll = async () => {
+          const g = await guardValue();
+          if (check(g)) return resolve(true);
+          if (Date.now() - start > timeoutMs) return resolve(false);
+          setTimeout(poll, 1200);
+        };
+        poll();
+      });
+    };
+
+    // 1. Accessibility service — THE gate that makes blocking actually work.
+    try {
+      await LockdownNative.requestAccessibility();
+      await waitFor((g) => g?.accessibility === 'granted');
+    } catch { /* leave off; user can retry from the System tab */ }
+
+    // 2. Overlay permission — needed for the full-screen sealed barrier.
+    try {
+      await LockdownNative.requestOverlay();
+      await waitFor((g) => g?.overlay === 'granted');
+    } catch { /* leave off */ }
+
+    // 3. Notifications (session alerts).
+    await ensureNotificationPermission().catch(() => false);
+
+    // 4. Battery exemption (keeps the watchdog alive on Redmi/MIUI).
+    try {
+      await LockdownNative.requestBatteryExemption();
+    } catch { /* non-fatal */ }
+
+    // 5. Device-admin tripwire — now requested AFTER the others and given
+    //    its own wait, so the "Add device admin" screen actually appears.
+    try {
+      await LockdownNative.requestDeviceAdmin();
+      await waitFor((g) => g?.admin === 'granted');
+    } catch { /* best-effort */ }
+
+    const guard = await guardValue();
     if (guard?.miui === 'detected') {
       await LockdownNative.openAutostartSettings().catch(() => false);
     }

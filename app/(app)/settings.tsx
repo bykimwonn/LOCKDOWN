@@ -7,7 +7,7 @@ import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function Settings() {
-  const { user, permissions, syncOk, lastSyncAt, signOut, apiBase, enforcementAvailable } = useApp();
+  const { user, permissions, refreshPermissionStatus, syncOk, lastSyncAt, signOut, apiBase, enforcementAvailable } = useApp();
   const inset = useSafeAreaInsets();
   const [guard, setGuard] = useState<DeviceGuard | null>(null);
 
@@ -77,11 +77,25 @@ export default function Settings() {
           }
         />
         <Hairline />
-        <Row k="Accessibility" v={permissions.accessibility} />
+        <Row
+          k="Accessibility"
+          v={permissions.accessibility}
+          onPress={() => LockdownNative.requestAccessibility().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+        />
         <Hairline />
-        <Row k="Overlay barrier" v={permissions.overlay} />
+        <Row
+          k="Overlay barrier"
+          v={permissions.overlay}
+          onPress={() => LockdownNative.requestOverlay().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+        />
         <Hairline />
-        <Row k="Battery exemption" v={guard?.battery ?? '—'} />
+        <Row k="Battery exemption" v={guard?.battery ?? '—'} onPress={() => LockdownNative.requestBatteryExemption().then(() => void refreshPermissionStatus()).catch(() => undefined)} />
+        <Hairline />
+        <Row
+          k="Device admin"
+          v={guard?.admin ?? '—'}
+          onPress={() => LockdownNative.requestDeviceAdmin().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+        />
         {guard?.miui === 'detected' ? (
           <>
             <Hairline />
@@ -114,7 +128,17 @@ export default function Settings() {
   );
 }
 
-function Row({ k, v }: { k: string; v: string }) {
+function Row({ k, v, onPress }: { k: string; v: string; onPress?: () => void }) {
+  if (onPress) {
+    return (
+      <View style={styles.row}>
+        <Text style={styles.k}>{k}</Text>
+        <Text style={[styles.v, styles.link]} onPress={onPress}>
+          {v} ›
+        </Text>
+      </View>
+    );
+  }
   return (
     <View style={styles.row}>
       <Text style={styles.k}>{k}</Text>
@@ -130,5 +154,6 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 11, gap: 12 },
   k: { fontFamily: fonts.sans, color: colors.inkMute, fontSize: 14 },
   v: { fontFamily: fonts.sansMed, color: colors.ink, fontSize: 14, flexShrink: 1, textAlign: 'right' },
+  link: { color: colors.amber },
   warn: { fontFamily: fonts.sans, color: colors.crimson, fontSize: 13, lineHeight: 19 },
 });

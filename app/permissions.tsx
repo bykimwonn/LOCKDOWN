@@ -70,14 +70,16 @@ export default function Permissions() {
             <Row
               icon={<Shield color={colors.amber} size={20} />}
               title="Accessibility service"
-              body="Watches app switches. Blocked apps are intercepted instantly."
+              body="Watches app switches. Blocked apps are intercepted instantly. Tap to open settings, then switch BT LOCKDOWN ON."
               ok={a11yOk}
+              onPress={() => LockdownNative.requestAccessibility().then(() => void refreshPermissionStatus()).catch(() => undefined)}
             />
             <Row
               icon={<Smartphone color={colors.mint} size={20} />}
               title="Display over other apps"
-              body="Full-screen sealed barrier when a distractor is opened."
+              body="Full-screen sealed barrier when a distractor is opened. Tap to allow."
               ok={overlayOk}
+              onPress={() => LockdownNative.requestOverlay().then(() => void refreshPermissionStatus()).catch(() => undefined)}
             />
           </Card>
 
@@ -94,6 +96,13 @@ export default function Permissions() {
               body="Required on Redmi / MIUI, or the process gets killed and the seal drops."
               ok={batteryOk}
               onPress={requestBatteryExemption}
+            />
+            <Row
+              icon={<Shield color={colors.crimson} size={20} />}
+              title="Device admin (phone admin)"
+              body="Prevents the seal being removed or the app uninstalled mid-session. Optional — tap to grant if you want tamper protection."
+              ok={guard?.admin === 'granted'}
+              onPress={() => LockdownNative.requestDeviceAdmin().then(() => void refreshPermissionStatus()).catch(() => undefined)}
             />
             {guard?.miui === 'detected' ? (
               <Row
