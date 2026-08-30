@@ -27,7 +27,7 @@ import {
 } from '@/src/services/api';
 import { clearOutbox, drainOutbox, initOutbox, setOutboxRunner } from '@/src/services/outbox';
 import { penaltyFor } from '@/src/services/penalties';
-import { ensureNotificationPermission, scheduleSessionStarts } from '@/src/services/notifications';
+import { cancelAllScheduledNotifications, ensureNotificationPermission, scheduleSessionStarts } from '@/src/services/notifications';
 import {
   LockdownNative,
   type NativeLockdownEvent,
@@ -149,7 +149,13 @@ function reducer(state: State, action: Action): State {
         shield: state.shield.map((a) => (a.id === action.id ? { ...a, blocked: !a.blocked } : a)),
       };
     case 'SET_SYNC':
-      return { ...state, syncOk: action.ok, lastSyncAt: action.at };
+      // lastSyncAt tracks ONLY successful syncs — a failed tick must not move
+      // it forward, or the green/red link key would show GREEN while offline.
+      return {
+        ...state,
+        syncOk: action.ok,
+        lastSyncAt: action.ok ? action.at : state.lastSyncAt,
+      };
     case 'APPLY_PENALTY': {
       if (!state.user) return state;
       const elo = Math.max(800, state.user.elo + action.eloDelta);
@@ -186,6 +192,8 @@ function reducer(state: State, action: Action): State {
 }
 
 type Ctx = State & {
+  /** Green/red strong-link key: true when BT LEARNING is live & recently synced. */
+  linkOk: boolean;
   login: (id: string, password: string) => Promise<void>;
   signOut: () => void;
   finishOnboarding: () => void;
@@ -218,6 +226,38 @@ function makeViolation(
     detail,
   };
 }
+
+/**
+ * Drives the native corner countdown chip. It shows "SEAL IN mm:ss" for the
+ * three minutes before the next upcoming session (so the student can get into
+ * BT LOCKDOWN), and the native service switches it to the in-session countdown
+ * automatically. Hides it when there is no imminent session.
+ */
+const DriveCorner = {
+  now(sessions: DeepWorkSession[], lockdown: LockdownState) {
+    if (Platform.OS !== 'android') return;
+    // If a session is active the native watchdog runs the in-session chip from
+    // prefs, so we only need to drive the pre-warning here.
+    if (lockdown.active) return;
+    const nowMs = serverNow().getTime();
+    const THREE_MIN = 3 * 60 * 1000;
+    const next = [...sessions]
+      .filter((s) => s.status !== 'abandoned' && s.status !== 'failed' && s.status !== 'completed')
+      .map((s) => ({ s, start: Date.parse(s.startsAt) }))
+      .filter((x) => Number.isFinite(x.start))
+      .sort((a, b) => a.start - b.start)[0];
+    if (!next) {
+      LockdownNative.hideCornerTimer().catch(() => undefined);
+      return;
+    }
+    const delta = next.start - nowMs;
+    if (delta > 0 && delta <= THREE_MIN) {
+      LockdownNative.showCornerTimer(next.start).catch(() => undefined);
+    } else {
+      LockdownNative.hideCornerTimer().catch(() => undefined);
+    }
+  },
+};
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initial);
@@ -335,6 +375,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const arm = useCallback(
     async (session: DeepWorkSession, armedBy: 'sync' | 'manual') => {
+      // Pre-flight: never arm a session the phone cannot actually enforce.
+      // The Accessibility service is what intercepts launches, and the Overlay
+      // permission is what makes the full-screen seal possible. If either is
+      // missing, arming just records a fake "active" state while the student
+      // can open anything. Refuse, route to the permissions screen, and let the
+      // caller surface the message.
+      const ready = await LockdownNative.getDeviceGuard().catch(() => null);
+      if (ready && (ready.accessibility !== 'granted' || ready.overlay !== 'granted')) {
+        dispatch({ type: 'SET_ENFORCEMENT', available: LockdownNative.available });
+        dispatch({ type: 'SET_GATE', gate: 'permissions' });
+        return;
+      }
       await LockdownNative.activate(session.id, session.endsAt, stateRef.current.shield, {
         title: session.title,
         subject: session.subject,
@@ -391,6 +443,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
+    let inactiveTicks = 0; // consecutive server-confirmed "not active" readings
 
     const backoffMs = () => {
       const base = failures >= 4 ? 30_000 : failures >= 2 ? 15_000 : failures === 1 ? 8_000 : 4_000;
@@ -408,6 +461,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         dispatch({ type: 'SET_SYNC', ok: true, at: result.serverNow });
         if (result.user) dispatch({ type: 'SET_USER', user: result.user });
         scheduleSessionStarts(result.sessions);
+        DriveCorner.now(result.sessions, s.lockdown);
         drainOutbox().catch(() => undefined);
 
         // Clock tamper — throttled, matches the server's 120s threshold
@@ -442,11 +496,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }
         }
 
-        if (s.lockdown.active && !result.lockdownActive && s.lockdown.armedBy === 'sync') {
-          await disarm('completed');
+        // Connection-lost safety: never disarm on a network blip. Only disarm
+        // a sync session when the server EXPLICITLY reports it inactive on two
+        // consecutive, successfully-parsed ticks (or the end time arrived). A
+        // single flaky {active:false} (or a temporary server fault) must not
+        // unlock the phone early — the native watchdog independently enforces
+        // the server's end_time and only unlocks at that moment.
+        if (s.lockdown.active && s.lockdown.armedBy === 'sync') {
+          if (!result.lockdownActive) {
+            inactiveTicks += 1;
+            if (inactiveTicks >= 2) await disarm('completed');
+          } else {
+            inactiveTicks = 0;
+          }
         }
       } catch {
         failures += 1;
+        // Network failure: leave the lock in place. Do NOT touch inactivation
+        // counters or the lockdown state — the phone stays sealed and the
+        // watchdog unlocks only when the programmed end time is reached.
         dispatch({ type: 'SET_SYNC', ok: false, at: serverNowIso() });
       }
       if (alive) timer = setTimeout(tick, backoffMs());
@@ -457,6 +525,52 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (timer) clearTimeout(timer);
     };
   }, [state.user, state.gate, arm, disarm, punish]);
+
+  // ------------------------------------------------------------------
+  // Background keep-alive: start the idle watchdog so the app auto-activates
+  // on its AI timetable even when the phone is locked / the app is closed.
+  // Also re-arm it whenever the app comes back to the foreground.
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (!state.user || !state.enforcementAvailable) return;
+    const boot = () => LockdownNative.startBackgroundGuard();
+    boot();
+    const sub = RNAppState.addEventListener('change', (next) => {
+      if (next === 'active') boot();
+    });
+    return () => sub.remove();
+  }, [state.user, state.enforcementAvailable]);
+
+  // Accessibility "forgotten" watchdog: if a session is active (or about to
+  // be) but the accessibility service is off, surface it loudly and re-route to
+  // permissions instead of silently letting the lock lapse. Runs on a slow
+  // heartbeat independent of the 4s sync so a dropped grant is noticed even
+  // when sync is healthy.
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !state.user) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = async () => {
+      const s = stateRef.current;
+      const guard = await LockdownNative.getDeviceGuard().catch(() => null);
+      // If enforcement is expected (active session, or an imminent block) but
+      // accessibility dropped, tell the store so the UI can guide re-granting.
+      if (guard && s.user && (s.lockdown.active || s.sessions.some((x) => x.status === 'active'))) {
+        if (guard.accessibility !== 'granted') {
+          dispatch({ type: 'SET_ENFORCEMENT', available: LockdownNative.available });
+          // Do not hard-bounce an active session here — the native watchdog
+          // hard-locks on accessibility-off already. This only makes the UI
+          // show the re-grant path; the arm pre-flight enforces at arm time.
+        }
+      }
+      if (alive) timer = setTimeout(check, 12_000);
+    };
+    check();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [state.user]);
 
   // ------------------------------------------------------------------
   // Native enforcement events (watchdog + accessibility service)
@@ -539,6 +653,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = useCallback(() => {
     LockdownNative.deactivate();
+    LockdownNative.hideCornerTimer().catch(() => undefined);
+    void cancelAllScheduledNotifications();
     void logoutDevice();
     clearOutbox();
     logoutRemote();
@@ -601,17 +717,59 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    await Promise.all([
-      LockdownNative.requestAccessibility().catch(() => false), // opens system sheet
-      LockdownNative.requestOverlay().catch(() => false),
-      ensureNotificationPermission().catch(() => false),
-      LockdownNative.requestBatteryExemption().catch(() => true),
-      // Device-admin tripwire (Tier 1 #6): blocks silent uninstall and
-      // makes removal of the seal mid-session a reported tamper. Best
-      // effort — the seal works without it if the student declines.
-      LockdownNative.requestDeviceAdmin().catch(() => false),
-    ]);
-    const guard = await LockdownNative.getDeviceGuard().catch(() => null);
+    // Open the system dialogs ONE AT A TIME and wait for the student to
+    // actually grant each before moving on. Firing all five at once makes
+    // Android show only one (or none) — which is exactly why the Device
+    // Admin / phone-admin prompt was never seen and the Accessibility
+    // service was left off, so the barrier never appeared. Reading
+    // getDeviceGuard() immediately also recorded "denied" before the
+    // student had a chance to toggle anything.
+    const guardValue = () =>
+      LockdownNative.getDeviceGuard().catch(() => null).then((g) => g ?? null);
+    const waitFor = async (
+      check: (g: Awaited<ReturnType<typeof guardValue>>) => boolean,
+      timeoutMs = 90_000
+    ): Promise<boolean> => {
+      const start = Date.now();
+      return new Promise((resolve) => {
+        const poll = async () => {
+          const g = await guardValue();
+          if (check(g)) return resolve(true);
+          if (Date.now() - start > timeoutMs) return resolve(false);
+          setTimeout(poll, 1200);
+        };
+        poll();
+      });
+    };
+
+    // 1. Accessibility service — THE gate that makes blocking actually work.
+    try {
+      await LockdownNative.requestAccessibility();
+      await waitFor((g) => g?.accessibility === 'granted');
+    } catch { /* leave off; user can retry from the System tab */ }
+
+    // 2. Overlay permission — needed for the full-screen sealed barrier.
+    try {
+      await LockdownNative.requestOverlay();
+      await waitFor((g) => g?.overlay === 'granted');
+    } catch { /* leave off */ }
+
+    // 3. Notifications (session alerts).
+    await ensureNotificationPermission().catch(() => false);
+
+    // 4. Battery exemption (keeps the watchdog alive on Redmi/MIUI).
+    try {
+      await LockdownNative.requestBatteryExemption();
+    } catch { /* non-fatal */ }
+
+    // 5. Device-admin tripwire — now requested AFTER the others and given
+    //    its own wait, so the "Add device admin" screen actually appears.
+    try {
+      await LockdownNative.requestDeviceAdmin();
+      await waitFor((g) => g?.admin === 'granted');
+    } catch { /* best-effort */ }
+
+    const guard = await guardValue();
     if (guard?.miui === 'detected') {
       await LockdownNative.openAutostartSettings().catch(() => false);
     }
@@ -689,9 +847,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const setGate = useCallback((gate: RouteGate) => dispatch({ type: 'SET_GATE', gate }), []);
 
+  // Strong-link indicator. GREEN only when: a real native build is linked AND
+  // the last sync succeeded AND it was within the last 2 minutes. Anything
+  // else (no user, no API base, stale/backed-off sync, Expo Go preview) is RED.
+  const linkOk =
+    Boolean(state.user) &&
+    Boolean(state.apiBase) &&
+    state.syncOk &&
+    state.enforcementAvailable &&
+    (state.lastSyncAt ? serverNow().getTime() - Date.parse(state.lastSyncAt) < 120_000 : false);
+
   const value = useMemo<Ctx>(
     () => ({
       ...state,
+      linkOk,
       login,
       signOut,
       finishOnboarding,
@@ -706,6 +875,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }),
     [
       state,
+      linkOk,
       login,
       signOut,
       finishOnboarding,

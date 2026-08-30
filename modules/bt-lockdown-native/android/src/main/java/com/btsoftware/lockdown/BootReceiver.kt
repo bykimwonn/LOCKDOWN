@@ -33,10 +33,11 @@ class BootReceiver : BroadcastReceiver() {
     ) {
       return
     }
-    val active = context.getSharedPreferences(LockdownOverlayService.PREFS, Context.MODE_PRIVATE)
-      .getBoolean("active", false)
-    if (active) {
-      LockdownOverlayService.start(context)
-    }
+    // Always restart the keep-alive watchdog after boot so the app can
+    // auto-activate on the AI timetable without the student reopening it. The
+    // idle watchdog self-arms when the server reports an active session, and it
+    // also resumes enforcing if a session was already active when the phone
+    // rebooted (the service re-reads prefs on start).
+    LockdownOverlayService.startIdle(context)
   }
 }

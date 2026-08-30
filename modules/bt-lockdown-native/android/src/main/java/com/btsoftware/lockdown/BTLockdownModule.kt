@@ -111,11 +111,25 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
 
   @ReactMethod
   fun openAutostartSettings(promise: Promise) {
-    // MIUI / Xiaomi autostart management. Not present on every OEM; best effort.
-    val candidates = listOf(
-      "com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagementActivity",
-      "com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagerActivity",
-      "com.iqoo.secure/com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"
+    // OEM "allow in background / don't kill" management. Tuned per manufacturer.
+    val candidates = when {
+      isSamsung() -> listOf(
+        // Samsung One UI: Battery → Background usage limits / Unmonitored apps
+        "com.samsung.android.lool/com.samsung.android.sm.ui.battery.BatteryActivity",
+        "com.samsung.android.lool/com.samsung.android.sm.ui.appmanagement.AppManagementActivity",
+        "com.samsung.android.sm/com.samsung.android.sm.ui.battery.BatteryActivity"
+      )
+      isMiui() -> listOf(
+        "com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagementActivity",
+        "com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagerActivity"
+      )
+      else -> emptyList()
+    } + listOf(
+      "com.iqoo.secure/com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity",
+      "com.huawei.systemmanager/com.huawei.systemmanager.appcontrol.activity.StartupAppControlActivity",
+      "com.coloros.safecenter/com.coloros.safecenter.permission.startup.StartupAppListActivity",
+      "com.coloros.safecenter/com.coloros.safecenter.startupapp.StartupAppListActivity",
+      "com.vivo.permissionmanager/com.vivo.permissionmanager.activity.BgStartUpManagerActivity"
     )
     for (flat in candidates) {
       try {
@@ -134,6 +148,12 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     promise.resolve(false)
   }
 
+  /** Convenience for the UI: is this a Samsung device? */
+  @ReactMethod
+  fun isSamsungDevice(promise: Promise) {
+    promise.resolve(isSamsung())
+  }
+
   @ReactMethod
   fun getDeviceGuard(promise: Promise) {
     val map = Arguments.createMap()
@@ -144,9 +164,42 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     )
     map.putString("battery", if (batteryIgnored()) "granted" else "denied")
     map.putString("admin", if (isAdminActive()) "granted" else "denied")
+    map.putString("owner", if (LockTaskController.isDeviceOwner(ctx)) "granted" else "denied")
+    map.putString("kiosk", if (LockTaskController.isDeviceOwner(ctx) && isLockTaskActive()) "granted" else "denied")
     map.putString("miui", if (isMiui()) "detected" else "none")
     map.putString("notifications", "pending")
     promise.resolve(map)
+  }
+
+  /** Enter kiosk / lock-task mode (device-owner only). Returns whether it worked. */
+  @ReactMethod
+  fun enterKiosk(promise: Promise) {
+    val activity = currentActivity
+    val ok = activity != null && LockTaskController.pin(activity)
+    promise.resolve(ok)
+  }
+
+  /** Leave kiosk / lock-task mode. Safe to call on any build. */
+  @ReactMethod
+  fun exitKiosk(promise: Promise) {
+    currentActivity?.let { LockTaskController.unpin(it) }
+    promise.resolve(true)
+  }
+
+  /** True when the app is currently pinned in lock-task (kiosk) mode. */
+  @ReactMethod
+  fun isKiosk(promise: Promise) {
+    promise.resolve(isLockTaskActive())
+  }
+
+  private fun isLockTaskActive(): Boolean {
+    return try {
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return false
+      val a = currentActivity ?: return false
+      a.isInLockTaskMode
+    } catch (_: Throwable) {
+      false
+    }
   }
 
   @ReactMethod
@@ -190,6 +243,15 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
       .putBoolean("adminActive", isAdminActive())
       .apply()
     LockdownOverlayService.start(ctx)
+    // Show the corner countdown for the session's remaining time even if the
+    // full-screen barrier is not currently raised (e.g. student is in a safe app).
+    val endsAt = parseIsoSafe(payload.getString("endsAt"))
+    if (endsAt > 0L) LockdownOverlayService.corner(ctx, endsAt)
+    // If the app is Device Owner, pin the WHOLE device in lock-task (kiosk)
+    // mode for the duration of the session — that is the real defence against
+    // force-stop / recents removal. Best-effort; on a normal install this is
+    // a no-op (isDeviceOwner == false).
+    currentActivity?.let { LockTaskController.pin(it) }
     promise.resolve(true)
   }
 
@@ -214,7 +276,30 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
   fun deactivate(promise: Promise) {
     ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .edit().putBoolean("active", false).apply()
+    LockdownOverlayService.cornerOff(ctx)
     LockdownOverlayService.stop(ctx)
+    // Release kiosk mode at session end.
+    currentActivity?.let { LockTaskController.unpin(it) }
+    promise.resolve(true)
+  }
+
+  /** Start the keep-alive idle watchdog so the app auto-activates on timetable. */
+  @ReactMethod
+  fun startBackgroundGuard(promise: Promise) {
+    LockdownOverlayService.startIdle(ctx)
+    promise.resolve(true)
+  }
+
+  /** Show the corner countdown chip counting down to targetAt (epoch ms). */
+  @ReactMethod
+  fun showCornerTimer(targetAt: Double, promise: Promise) {
+    LockdownOverlayService.corner(ctx, targetAt.toLong())
+    promise.resolve(true)
+  }
+
+  @ReactMethod
+  fun hideCornerTimer(promise: Promise) {
+    LockdownOverlayService.cornerOff(ctx)
     promise.resolve(true)
   }
 
@@ -242,6 +327,27 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     val manufacturer = (Build.MANUFACTURER ?: "").lowercase()
     return brand.contains("xiaomi") || brand.contains("redmi") ||
       manufacturer.contains("xiaomi") || manufacturer.contains("redmi")
+  }
+
+  private fun isSamsung(): Boolean {
+    val brand = (Build.BRAND ?: "").lowercase()
+    val manufacturer = (Build.MANUFACTURER ?: "").lowercase()
+    return brand.contains("samsung") || manufacturer.contains("samsung")
+  }
+
+  /** Parse a UTC ISO timestamp to epoch ms. Returns 0 on failure. */
+  private fun parseIsoSafe(value: String?): Long {
+    if (value.isNullOrBlank()) return 0L
+    return try {
+      val raw = value.trim().replace(' ', 'T')
+      val noZone = raw.substringBefore('Z').substringBefore('+').substringBefore('.')
+      val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).apply {
+        timeZone = java.util.TimeZone.getTimeZone("UTC")
+      }
+      fmt.parse(noZone)?.time ?: 0L
+    } catch (_: Throwable) {
+      0L
+    }
   }
 
   private fun isAdminActive(): Boolean {

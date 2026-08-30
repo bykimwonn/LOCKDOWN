@@ -7,7 +7,7 @@ import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function Settings() {
-  const { user, permissions, syncOk, lastSyncAt, signOut, apiBase, enforcementAvailable } = useApp();
+  const { user, permissions, refreshPermissionStatus, syncOk, lastSyncAt, signOut, apiBase, enforcementAvailable, linkOk } = useApp();
   const inset = useSafeAreaInsets();
   const [guard, setGuard] = useState<DeviceGuard | null>(null);
 
@@ -51,15 +51,52 @@ export default function Settings() {
         ) : null}
       </Card>
 
+      <Label style={{ marginTop: 22, marginBottom: 10 }}>About</Label>
+      <Card>
+        <Row k="Name" v={user?.name ?? '—'} />
+        <Hairline />
+        <Row k="Email" v={user?.email ?? '—'} />
+        <Hairline />
+        <Row k="Handle" v={user?.handle ?? '—'} />
+        <Hairline />
+        <Row k="Student ID" v={user?.studentId ?? '—'} />
+        <Hairline />
+        <Row k="Role" v={user?.role ?? 'Student'} />
+        <Hairline />
+        <Row k="Account ID" v={user?.id ?? '—'} />
+        <Hairline />
+        <Row k="ELO" v={user ? String(user.elo) : '—'} />
+        <Hairline />
+        <Row k="Current streak" v={user ? `${user.streak} day${user.streak === 1 ? '' : 's'}` : '—'} />
+        <Hairline />
+        <Row k="Longest streak" v={user ? `${user.longestStreak} day${user.longestStreak === 1 ? '' : 's'}` : '—'} />
+        <Hairline />
+        <Row k="Sealed sessions" v={user ? String(user.sessionsCompleted) : '—'} />
+        <Hairline />
+        <Row k="Minutes locked" v={user ? String(user.minutesLocked) : '—'} />
+        <Hairline />
+        <Row k="Device" v={dev ? `${(dev.platform || 'device').toUpperCase()} ${String(dev.device_id || '').slice(0, 8)}…` : 'Not bound'} />
+      </Card>
+
       <Label style={{ marginTop: 22, marginBottom: 10 }}>Sync bridge</Label>
       <Card>
-        <Row k="BT LEARNING" v={syncOk ? 'Live' : 'Unreachable'} />
-        <Hairline />
-        <Row k="API" v={apiBase || 'not set'} />
+        <View style={[styles.linkRow, { borderColor: linkOk ? colors.mint : colors.crimson }]}>
+          <View style={[styles.linkDot, { backgroundColor: linkOk ? colors.mint : colors.crimson }]} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.linkT}>BT LEARNING ↔ BT LOCKDOWN</Text>
+            <Text style={styles.linkS}>
+              {linkOk
+                ? 'Strong link — timetables, penalties and lockouts sync live.'
+                : 'Link interrupted — the app will still hold its own seal and re-sync when the server is reachable.'}
+            </Text>
+          </View>
+        </View>
         <Hairline />
         <Row k="Last flag" v={lastSyncAt ? lastSyncAt.slice(11, 19) + 'Z' : '—'} />
         <Hairline />
         <Row k="Clock authority" v="Server time only" />
+        <Hairline />
+        <Row k="Auto-lock" v="On AI timetable" />
         <Hairline />
         <Row k="Native module" v={LockdownNative.available ? 'Linked' : 'JS fallback'} />
       </Card>
@@ -77,11 +114,25 @@ export default function Settings() {
           }
         />
         <Hairline />
-        <Row k="Accessibility" v={permissions.accessibility} />
+        <Row
+          k="Accessibility"
+          v={permissions.accessibility}
+          onPress={() => LockdownNative.requestAccessibility().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+        />
         <Hairline />
-        <Row k="Overlay barrier" v={permissions.overlay} />
+        <Row
+          k="Overlay barrier"
+          v={permissions.overlay}
+          onPress={() => LockdownNative.requestOverlay().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+        />
         <Hairline />
-        <Row k="Battery exemption" v={guard?.battery ?? '—'} />
+        <Row k="Battery exemption" v={guard?.battery ?? '—'} onPress={() => LockdownNative.requestBatteryExemption().then(() => void refreshPermissionStatus()).catch(() => undefined)} />
+        <Hairline />
+        <Row
+          k="Device admin"
+          v={guard?.admin ?? '—'}
+          onPress={() => LockdownNative.requestDeviceAdmin().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+        />
         {guard?.miui === 'detected' ? (
           <>
             <Hairline />
@@ -89,6 +140,33 @@ export default function Settings() {
           </>
         ) : null}
       </Card>
+
+      <Label style={{ marginTop: 22, marginBottom: 10 }}>Device owner · kiosk</Label>
+      <Card>
+        <View style={[styles.linkRow, { borderColor: guard?.owner === 'granted' ? colors.mint : colors.crimson }]}>
+          <View style={[styles.linkDot, { backgroundColor: guard?.owner === 'granted' ? colors.mint : colors.crimson }]} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.linkT}>DEVICE OWNER {guard?.owner === 'granted' ? '· ACTIVE' : '· NOT SET'}</Text>
+            <Text style={styles.linkS}>
+              {guard?.owner === 'granted'
+                ? 'Kiosk mode is available — the app can pin the whole device and block force-stop.'
+                : 'Not a device owner. The app still seals via Accessibility + Overlay, but a student could force-stop it. Set device owner with: adb shell dpm set-device-owner com.btsoftware.lockdown/.LockdownAdminReceiver'}
+            </Text>
+          </View>
+        </View>
+        <Hairline />
+        <Row k="Kiosk (lock-task)" v={guard?.kiosk === 'granted' ? 'Pinned' : 'Off'} />
+        <Hairline />
+        <Row k="Uninstall guard" v={guard?.admin === 'granted' ? 'Active' : 'Off'} />
+      </Card>
+      {guard?.owner === 'granted' ? (
+        <Button
+          title="Enter kiosk mode now"
+          variant="mint"
+          style={{ marginTop: 12 }}
+          onPress={() => LockdownNative.enterKiosk().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+        />
+      ) : null}
 
       {!enforcementAvailable ? (
         <Card style={{ marginTop: 10 }}>
@@ -114,7 +192,17 @@ export default function Settings() {
   );
 }
 
-function Row({ k, v }: { k: string; v: string }) {
+function Row({ k, v, onPress }: { k: string; v: string; onPress?: () => void }) {
+  if (onPress) {
+    return (
+      <View style={styles.row}>
+        <Text style={styles.k}>{k}</Text>
+        <Text style={[styles.v, styles.link]} onPress={onPress}>
+          {v} ›
+        </Text>
+      </View>
+    );
+  }
   return (
     <View style={styles.row}>
       <Text style={styles.k}>{k}</Text>
@@ -130,5 +218,17 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 11, gap: 12 },
   k: { fontFamily: fonts.sans, color: colors.inkMute, fontSize: 14 },
   v: { fontFamily: fonts.sansMed, color: colors.ink, fontSize: 14, flexShrink: 1, textAlign: 'right' },
+  link: { color: colors.amber },
   warn: { fontFamily: fonts.sans, color: colors.crimson, fontSize: 13, lineHeight: 19 },
+  linkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+  },
+  linkDot: { width: 14, height: 14, borderRadius: 7 },
+  linkT: { fontFamily: fonts.sansSemi, color: colors.ink, fontSize: 14 },
+  linkS: { fontFamily: fonts.sans, color: colors.inkMute, fontSize: 12, lineHeight: 18, marginTop: 2 },
 });

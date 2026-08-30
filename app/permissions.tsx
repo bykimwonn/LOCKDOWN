@@ -13,6 +13,7 @@ export default function Permissions() {
   const ios = Platform.OS === 'ios';
   const [guard, setGuard] = useState<DeviceGuard | null>(null);
   const [busy, setBusy] = useState(false);
+  const [samsung, setSamsung] = useState(false);
 
   useEffect(() => {
     if (ios) return;
@@ -20,6 +21,8 @@ export default function Permissions() {
     const read = async () => {
       const g = await LockdownNative.getDeviceGuard().catch(() => null);
       if (alive && g) setGuard(g);
+      const s = await LockdownNative.isSamsungDevice().catch(() => false);
+      if (alive && s) setSamsung(true);
     };
     read();
     const id = setInterval(read, 2500);
@@ -52,7 +55,7 @@ export default function Permissions() {
       <Body dim style={{ marginTop: 12, marginBottom: 22 }}>
         {ios
           ? 'BT LOCKDOWN currently seals Android devices. On iPhone the app syncs with BT LEARNING, but it cannot intercept other apps — enforcement requires the Apple Family Controls build, which is in progress. Use an Android phone for lockdown.'
-          : 'Grant the system access below. On Xiaomi / Redmi, also allow BT LOCKDOWN to start on boot and ignore battery savings, or Android will quietly kill the lockdown.'}
+          : 'Grant the system access below. Also stop the OS from killing BT LOCKDOWN in the background — every OEM (Samsung, Xiaomi, Huawei, Oppo, Vivo) hides this in a different menu, so a one-tap button below opens the right screen for your phone.'}
       </Body>
 
       {ios ? (
@@ -70,14 +73,16 @@ export default function Permissions() {
             <Row
               icon={<Shield color={colors.amber} size={20} />}
               title="Accessibility service"
-              body="Watches app switches. Blocked apps are intercepted instantly."
+              body="Watches app switches. Blocked apps are intercepted instantly. Tap to open settings, then switch BT LOCKDOWN ON."
               ok={a11yOk}
+              onPress={() => LockdownNative.requestAccessibility().then(() => void refreshPermissionStatus()).catch(() => undefined)}
             />
             <Row
               icon={<Smartphone color={colors.mint} size={20} />}
               title="Display over other apps"
-              body="Full-screen sealed barrier when a distractor is opened."
+              body="Full-screen sealed barrier when a distractor is opened. Tap to allow."
               ok={overlayOk}
+              onPress={() => LockdownNative.requestOverlay().then(() => void refreshPermissionStatus()).catch(() => undefined)}
             />
           </Card>
 
@@ -95,11 +100,22 @@ export default function Permissions() {
               ok={batteryOk}
               onPress={requestBatteryExemption}
             />
-            {guard?.miui === 'detected' ? (
+            <Row
+              icon={<Shield color={colors.crimson} size={20} />}
+              title="Device admin (phone admin)"
+              body="Prevents the seal being removed or the app uninstalled mid-session. Optional — tap to grant if you want tamper protection."
+              ok={guard?.admin === 'granted'}
+              onPress={() => LockdownNative.requestDeviceAdmin().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+            />
+            {guard?.miui === 'detected' || samsung ? (
               <Row
                 icon={<Smartphone color={colors.amber} size={20} />}
-                title="MIUI autostart"
-                body="The button below opens it. Allow BT LOCKDOWN, then lock it in recents."
+                title={samsung ? 'Samsung background access' : 'MIUI autostart'}
+                body={
+                  samsung
+                    ? 'One UI sleeps apps aggressively. Tap to open Battery → Background usage limits, allow BT LOCKDOWN, then set it as "Unmonitored".'
+                    : 'The button below opens it. Allow BT LOCKDOWN, then lock it in recents.'
+                }
                 ok={false}
                 onPress={() => LockdownNative.openAutostartSettings().catch(() => undefined)}
               />
@@ -107,8 +123,8 @@ export default function Permissions() {
           </Card>
 
           <Body dim style={{ marginTop: 10, marginBottom: 18 }}>
-            Last step: swipe up on the home screen, open recent apps, and press the lock icon on
-            BT LOCKDOWN. This keeps the watchdog alive even when you are studying.
+            Last step: open recent apps and press the lock icon on BT LOCKDOWN. This keeps the
+            watchdog alive even when you are studying — and stops the OS killing it mid-session.
           </Body>
         </>
       )}
@@ -130,15 +146,60 @@ export default function Permissions() {
         </View>
       )}
       <Button
-        title={ios ? 'Continue (sync only)' : busy ? 'Arming…' : 'Enter BT LOCKDOWN'}
+        title={
+          ios
+            ? 'Continue (sync only)'
+            : busy
+              ? 'Arming…'
+              : a11yOk && overlayOk
+                ? 'Enter BT LOCKDOWN'
+                : a11yOk
+                  ? 'Grant overlay to continue'
+                  : 'Enable Accessibility to continue'
+        }
         onPress={go}
         disabled={busy}
       />
       {!ios && !a11yOk ? (
-        <Text style={styles.fine}>
-          Without the accessibility service the phone can sync with BT LEARNING but cannot block
-          apps. You can enter now and come back from the System tab.
-        </Text>
+        <Card style={{ marginTop: 12, borderColor: colors.crimson }}>
+          <Text style={styles.fine}>
+            You cannot enter until the Accessibility service is ON. This is the only thing that
+            actually intercepts distracting apps — without it the phone syncs with BT LEARNING but
+            cannot seal itself.
+          </Text>
+          <Text
+            style={styles.linkLine}
+            onPress={() => {
+              setBusy(true);
+              LockdownNative.requestAccessibility()
+                .then(() => void refreshPermissionStatus())
+                .catch(() => undefined)
+                .finally(() => setBusy(false));
+            }}
+          >
+            Open Accessibility settings ›
+          </Text>
+        </Card>
+      ) : null}
+      {!ios && a11yOk && !overlayOk ? (
+        <Card style={{ marginTop: 12, borderColor: colors.crimson }}>
+          <Text style={styles.fine}>
+            One more step: allow BT LOCKDOWN to display over other apps. That Permission is what
+            draws the full-screen seal over a blocked app.
+          </Text>
+          <Text
+            style={styles.linkLine}
+            onPress={() => {
+              setBusy(true);
+              LockdownNative.requestOverlay()
+                .then(() => void refreshPermissionStatus())
+                .catch(() => undefined)
+                .finally(() => setBusy(false));
+            }}
+          >
+            Open Overlay settings ›
+          </Text>
+        </Card>
       ) : null}
     </View>
   );
@@ -192,10 +253,14 @@ const styles = StyleSheet.create({
   warnT: { fontFamily: fonts.sans, color: colors.crimson, fontSize: 13, lineHeight: 19 },
   fine: {
     fontFamily: fonts.sans,
-    color: colors.inkFaint,
-    fontSize: 12,
-    textAlign: 'center',
-    marginTop: 12,
-    lineHeight: 18,
+    color: colors.inkMute,
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  linkLine: {
+    fontFamily: fonts.sansSemi,
+    color: colors.amber,
+    fontSize: 14,
+    marginTop: 8,
   },
 });

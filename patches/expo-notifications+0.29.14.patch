@@ -1,0 +1,15 @@
+diff --git a/node_modules/expo-notifications/android/src/main/java/expo/modules/notifications/service/delegates/FirebaseMessagingDelegate.kt b/node_modules/expo-notifications/android/src/main/java/expo/modules/notifications/service/delegates/FirebaseMessagingDelegate.kt
+--- a/node_modules/expo-notifications/android/src/main/java/expo/modules/notifications/service/delegates/FirebaseMessagingDelegate.kt
++++ b/node_modules/expo-notifications/android/src/main/java/expo/modules/notifications/service/delegates/FirebaseMessagingDelegate.kt
+@@ -50,8 +50,9 @@
+         sTokenListenersReferences[listener] = WeakReference(listener)
+         // Since it's a new listener and we know of a last valid token, let's let them know.
+-        if (sLastToken != null) {
+-          listener.onNewToken(sLastToken)
+-        }
++        val token = sLastToken
++        if (token != null) {
++          listener.onNewToken(token)
++        }
+       }
+     }

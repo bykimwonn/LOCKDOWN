@@ -257,6 +257,91 @@ This builds in cloud (~10-20 min). You'll get a download link for APK.
 
 **Important:** Before building, set production API URL in `app.json` → `extra.apiBaseUrl` to your Render URL, otherwise APK will have old default `https://api.btlearningsolutions.com`.
 
+### Build APK locally on Windows (Android Studio — no cloud, no EAS)
+
+`eas build --local` **does not work on Windows** — EAS only supports local Android builds on
+macOS or Linux, so you'll get:
+
+```
+Unsupported platform, macOS or Linux is required to build apps for Android
+```
+
+If your EAS free tier is used up, don't fight it. On Windows you already have everything you
+need (Android Studio bundles the Android SDK + a JDK), so **build directly with Gradle** and
+skip EAS entirely. Verified working on Windows 10 + Android Studio + Expo SDK 52:
+
+**1. Set two environment variables (persistent) in PowerShell — open a NEW PowerShell after:**
+
+```powershell
+[Environment]::SetEnvironmentVariable("ANDROID_HOME", "$env:LOCALAPPDATA\Android\Sdk", "User")
+[Environment]::SetEnvironmentVariable("ANDROID_SDK_ROOT", "$env:LOCALAPPDATA\Android\Sdk", "User")
+[Environment]::SetEnvironmentVariable("JAVA_HOME", "C:\Program Files\Android\Android Studio\jbr", "User")
+```
+
+The Android SDK default is `C:\Users\<You>\AppData\Local\Android\Sdk`. To confirm the exact
+path, open **Android Studio → File → Settings → Appearance & Behavior → System Settings →
+Android SDK** and copy the **Android SDK Location** (or check that path has `platform-tools`,
+`platforms`, `build-tools`).
+
+**2. Confirm the SDK + JDK in a fresh PowerShell:**
+
+```powershell
+Test-Path "$env:ANDROID_HOME"                       # must be True
+Test-Path "$env:ANDROID_HOME\platform-tools"        # must be True
+java -version                                        # must be 17.x or 21.x, NOT 25
+```
+
+**3. Generate the native Android project:**
+
+```powershell
+npx expo prebuild --platform android --no-install
+npm run test:manifest    # repo's own guardrail — should print "valid"
+```
+
+**4. CRITICAL — point Gradle at a real JDK 17 (not Android Studio's JBR):**
+
+Android Studio's bundled JBR (`...\Android Studio\jbr`) is often **Java 25**, which Gradle 8.10.2
+cannot run. Your `java -version` may print 17 while Gradle still uses a 25 launcher. Force
+Gradle onto JDK 17 by editing `android\gradle.properties` and adding:
+
+```properties
+org.gradle.java.home=C:/Program Files/Microsoft/jdk-17.0.20.101-hotspot
+```
+
+Replace the path with **your own** JDK 17 (`C:\Program Files\Microsoft\jdk-...` or Eclipse
+Adoptium Temurin). Use forward slashes even on Windows.
+
+**5. If the Gradle wrapper download times out** (slow internet), open `android\gradle\wrapper\gradle-wrapper.properties`
+and add a big timeout (ms), then rebuild:
+
+```properties
+networkTimeout=600000
+```
+
+**6. Build the release APK:**
+
+```powershell
+cd android
+.\gradlew.bat --stop                        # kill any stale daemon on the wrong JDK
+.\gradlew.bat --version                     # "Daemon JVM" must be 17.x, NOT 25.x
+.\gradlew.bat assembleRelease
+```
+
+Result:
+```
+android\app\build\outputs\apk\release\app-release.apk
+```
+
+Signed with the local debug keystore — fine for sideloading on your phone (not for Play Store).
+Not supported on Windows: `eas build --local`. Supported: the Gradle path above, or a cloud
+`eas build` (needs EAS free tier / quota).
+
+**If Gradle says a component is missing**, open Android Studio → **Tools → SDK Manager**:
+- **SDK Platforms** → tick **Android 15 (API 35)** → Apply
+- **SDK Tools** → tick **NDK (Side by Side)** (any recent) → Apply
+
+Then re-run `.\gradlew.bat assembleRelease`.
+
 ### Install APK on phone:
 - Download APK on phone, allow unknown sources, install.
 - Open BT LOCKDOWN
@@ -402,6 +487,11 @@ build only fails because of the Java version.
 **11. `eas build --local` fails with `SDK location not found` and `Could not get
 unknown property 'release'`**
 
+> ⚠️ **On Windows**, `eas build --local` aborts immediately with "Unsupported platform, macOS or
+> Linux is required to build apps for Android." EAS only supports local Android builds on
+> macOS/Linux. Use the **Windows + Android Studio → Gradle** path in Section 8 (build APK locally)
+> instead. The rest of this issue is for Linux/macOS local builds.
+
 → The `release` error is just a **follow-on** of the first one: your machine has
 no Android SDK path configured, so Expo's native modules can't configure and
 Gradle aborts. Fix by pointing `ANDROID_HOME` at the Android SDK:
@@ -484,8 +574,14 @@ npx expo prebuild -p android --no-install --clean && npm run test:manifest
 
 # Build
 eas login
-eas build --platform android --profile preview   # APK
-eas build --platform android --profile production # AAB
+eas build --platform android --profile preview   # APK (cloud)
+eas build --platform android --profile production # AAB (cloud)
+
+# Local APK on Windows (no cloud / no EAS) — see Section 8
+npx expo prebuild --platform android --no-install
+cd android
+.\gradlew.bat assembleRelease
+# APK -> android\app\build\outputs\apk\release\app-release.apk
 
 # Clean if something broken
 npx expo prebuild --clean

@@ -9,6 +9,13 @@ type NativeLockdown = {
   requestBatteryExemption: () => Promise<boolean>;
   requestDeviceAdmin: () => Promise<boolean>;
   openAutostartSettings: () => Promise<boolean>;
+  isSamsungDevice: () => Promise<boolean>;
+  startBackgroundGuard: () => Promise<boolean>;
+  showCornerTimer: (targetAt: number) => Promise<boolean>;
+  hideCornerTimer: () => Promise<boolean>;
+  enterKiosk: () => Promise<boolean>;
+  exitKiosk: () => Promise<boolean>;
+  isKiosk: () => Promise<boolean>;
   getPermissionStatus: () => Promise<PermissionStatus>;
   getDeviceGuard: () => Promise<DeviceGuard>;
   activate: (payload: {
@@ -35,6 +42,10 @@ export type DeviceGuard = {
   overlay: 'granted' | 'denied' | 'unavailable';
   battery: 'granted' | 'denied' | 'unavailable';
   admin: 'granted' | 'denied' | 'unavailable';
+  /** True when this app is provisioned as device owner. */
+  owner: 'granted' | 'denied' | 'unavailable';
+  /** True when the device is currently pinned in lock-task / kiosk mode. */
+  kiosk: 'granted' | 'denied' | 'unavailable';
   miui: 'detected' | 'none';
   notifications: string;
 };
@@ -67,6 +78,8 @@ function defaultGuard(): DeviceGuard {
     overlay: 'unavailable',
     battery: 'unavailable',
     admin: 'unavailable',
+    owner: 'unavailable',
+    kiosk: 'unavailable',
     miui: 'none',
     notifications: 'pending',
   };
@@ -81,6 +94,23 @@ function defaultGuard(): DeviceGuard {
  *   instead of pretending.
  * - iOS: Family Controls build not wired yet — treated as unsupported.
  */
+/**
+ * Essential packages that always stay reachable while a session is sealed,
+ * plus the set of shield apps the teacher left UNBLOCKED. The native
+ * enforcement is default-deny: only this whitelist (+ the hard-allow system
+ * apps like phone / SMS / in-call baked into the accessibility service) gets
+ * through. Any app not on the shield at all, or that the teacher has marked
+ * blocked, is intercepted — that is the "system level" lock.
+ */
+const essentialWhitelist = [
+  'com.btsoftware.lockdown',
+  'com.btsoftware.learning',
+  'com.apple.mobilephone',
+  'com.apple.MobileSMS',
+  'com.android.dialer',
+  'com.google.android.apps.messaging',
+];
+
 export const LockdownNative = {
   get available(): boolean {
     return Platform.OS === 'android' && Boolean(LINKED?.activate);
@@ -116,6 +146,48 @@ export const LockdownNative = {
     return false;
   },
 
+  async isSamsungDevice() {
+    if (LINKED?.isSamsungDevice) return LINKED.isSamsungDevice();
+    return false;
+  },
+
+  /**
+   * Keep the native enforcement service alive in the background (idle) so the
+   * app can auto-activate on its AI timetable without the student reopening it.
+   */
+  async startBackgroundGuard() {
+    if (LINKED?.startBackgroundGuard) return LINKED.startBackgroundGuard();
+    return false;
+  },
+
+  /** Show the corner countdown chip counting down to targetAt (epoch ms). */
+  async showCornerTimer(targetAt: number) {
+    if (LINKED?.showCornerTimer) return LINKED.showCornerTimer(targetAt);
+    return false;
+  },
+
+  async hideCornerTimer() {
+    if (LINKED?.hideCornerTimer) return LINKED.hideCornerTimer();
+    return false;
+  },
+
+  /** Pin the whole device in kiosk mode (device-owner only). */
+  async enterKiosk() {
+    if (LINKED?.enterKiosk) return LINKED.enterKiosk();
+    return false;
+  },
+
+  /** Release kiosk / lock-task mode. */
+  async exitKiosk() {
+    if (LINKED?.exitKiosk) return LINKED.exitKiosk();
+    return false;
+  },
+
+  async isKiosk() {
+    if (LINKED?.isKiosk) return LINKED.isKiosk();
+    return false;
+  },
+
   async getDeviceGuard(): Promise<DeviceGuard> {
     if (Platform.OS === 'android' && LINKED?.getDeviceGuard) return LINKED.getDeviceGuard();
     return defaultGuard();
@@ -133,14 +205,9 @@ export const LockdownNative = {
     meta?: { title?: string; subject?: string; armedBy?: string }
   ) {
     const blocked = apps.filter((a) => a.blocked).map((a) => a.packageId);
-    const whitelist = [
-      'com.btsoftware.lockdown',
-      'com.btsoftware.learning',
-      'com.apple.mobilephone',
-      'com.apple.MobileSMS',
-      'com.android.dialer',
-      'com.google.android.apps.messaging',
-    ];
+    // Every app the teacher left unblocked is an allowed study app.
+    const allowed = apps.filter((a) => !a.blocked).map((a) => a.packageId);
+    const whitelist = Array.from(new Set([...essentialWhitelist, ...allowed]));
     if (LINKED?.activate) {
       return LINKED.activate({
         sessionId,
@@ -159,12 +226,8 @@ export const LockdownNative = {
 
   async updateShield(apps: ShieldApp[]) {
     const blocked = apps.filter((a) => a.blocked).map((a) => a.packageId);
-    const whitelist = [
-      'com.btsoftware.lockdown',
-      'com.btsoftware.learning',
-      'com.android.dialer',
-      'com.google.android.apps.messaging',
-    ];
+    const allowed = apps.filter((a) => !a.blocked).map((a) => a.packageId);
+    const whitelist = Array.from(new Set([...essentialWhitelist, ...allowed]));
     if (LINKED?.updateShield) {
       return LINKED.updateShield({ blockedPackages: blocked, whitelistPackages: whitelist });
     }

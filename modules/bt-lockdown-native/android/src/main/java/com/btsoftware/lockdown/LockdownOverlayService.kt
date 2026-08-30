@@ -48,6 +48,14 @@ class LockdownOverlayService : Service() {
   private var overlay: View? = null
   private var countText: TextView? = null
 
+  // Corner countdown chip. A tiny non-blocking overlay in the top-right that
+  // shows "3 min to lockdown" during the pre-warning window and then the live
+  // remaining time while a session is active — so the student always has a
+  // clock even when the full-screen barrier is not up (safe app).
+  private var cornerView: View? = null
+  private var cornerText: TextView? = null
+  private var cornerTargetAt = 0L // epoch ms (server-anchored when available)
+
   private val main = Handler(Looper.getMainLooper())
   private lateinit var worker: HandlerThread
   private lateinit var workerH: Handler
@@ -134,6 +142,13 @@ class LockdownOverlayService : Service() {
       ACTION_STOP -> stopEverything()
       ACTION_SHOW -> showOverlay()
       ACTION_HIDE -> hideOverlay()
+      ACTION_CORNER -> {
+        // JS tells us when to show the 3-minute corner countdown.
+        cornerTargetAt = intent.getLongExtra("targetAt", 0L)
+        showCorner()
+      }
+      ACTION_CORNER_OFF -> hideCorner()
+      ACTION_IDLE -> startIdleWatchdog()
       else -> if (prefs.getBoolean("active", false)) startWatchdog()
     }
     return START_STICKY
@@ -171,6 +186,16 @@ class LockdownOverlayService : Service() {
       setBackgroundColor(Color.parseColor("#040405"))
       setPadding(dp(24), dp(40), dp(24), dp(36))
       setOnTouchListener { _, _ -> true } // swallow every touch
+      // Hide the status bar + gesture nav while sealed so a student cannot
+      // pull the notification shade / recents over the barrier to reach
+      // Settings and disable accessibility. FLAG_SECURE also blocks
+      // screenshots / screen-recording of the seal.
+      systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        or View.SYSTEM_UI_FLAG_FULLSCREEN
+        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
     }
 
     val top = LinearLayout(this).apply {
@@ -221,12 +246,45 @@ class LockdownOverlayService : Service() {
     root.addView(countText)
 
     val note = TextView(this).apply {
-      text = "This phone is sealed until the session ends.\nReturn to BT LOCKDOWN to continue studying."
+      text = "This phone is sealed until the session ends.\nTap below to return to BT LOCKDOWN."
       setTextColor(Color.parseColor("#8A8A93"))
       textSize = 14f
       gravity = Gravity.CENTER
     }
     root.addView(note)
+
+    // A real, always-reachable return path. The barrier is touch-modal, so the
+    // student can no longer tap the launcher to get back to the app; this is the
+    // one way in. Launching our own package is always allowed (it is the safe
+    // zone in the accessibility service).
+    val returnBtn = TextView(this).apply {
+      text = "OPEN BT LOCKDOWN"
+      setTextColor(Color.parseColor("#0A0A0B"))
+      setBackgroundColor(Color.parseColor("#FF7A15"))
+      textSize = 15f
+      setTypeface(typeface, Typeface.BOLD)
+      gravity = Gravity.CENTER
+      isClickable = true
+      setPadding(dp(22), dp(12), dp(22), dp(12))
+      setOnClickListener {
+        try {
+          val launch = packageManager.getLaunchIntentForPackage(packageName)
+            ?.addFlags(
+              Intent.FLAG_ACTIVITY_NEW_TASK
+                or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            )
+          if (launch != null) startActivity(launch)
+        } catch (_: Throwable) { }
+      }
+    }
+    val btnHolder = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER
+      setPadding(0, dp(6), 0, 0)
+    }
+    btnHolder.addView(returnBtn)
+    root.addView(btnHolder)
 
     val midGap2 = View(this).apply { layoutParams = LinearLayout.LayoutParams(1, 1, 1f) }
     root.addView(midGap2)
@@ -245,8 +303,9 @@ class LockdownOverlayService : Service() {
       overlayType(),
       WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
         or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-        or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+        or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        or WindowManager.LayoutParams.FLAG_SECURE
+        or WindowManager.LayoutParams.FLAG_FULLSCREEN,
       PixelFormat.OPAQUE
     ).apply {
       gravity = Gravity.TOP or Gravity.START
@@ -314,6 +373,167 @@ class LockdownOverlayService : Service() {
     val m = (total % 3600) / 60
     val s = total % 60
     countText?.text = String.format("%02d:%02d:%02d", h, m, s)
+  }
+
+  // ------------------------------------------------------------------
+  // Corner countdown chip (pre-warning + in-session clock)
+  // ------------------------------------------------------------------
+
+  private fun showCorner() {
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+      main.post { showCorner() }
+      return
+    }
+    if (cornerView != null) { updateCorner(); return }
+    if (!Settings.canDrawOverlays(this)) {
+      Bridge.emit("overlayDenied")
+      return
+    }
+    val chip = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      setBackgroundColor(Color.parseColor("#CC0A0B0E"))
+      setPadding(dp(12), dp(6), dp(12), dp(6))
+      setOnTouchListener { _, _ -> true } // swallow, not interactive
+    }
+    cornerText = TextView(this).apply {
+      text = ""
+      setTextColor(Color.parseColor("#FF7A18"))
+      textSize = 13f
+      setTypeface(typeface, Typeface.BOLD)
+      gravity = Gravity.CENTER
+    }
+    chip.addView(cornerText)
+
+    val params = WindowManager.LayoutParams(
+      WindowManager.LayoutParams.WRAP_CONTENT,
+      WindowManager.LayoutParams.WRAP_CONTENT,
+      overlayType(),
+      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+        or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+      PixelFormat.TRANSLUCENT
+    ).apply {
+      gravity = Gravity.TOP or Gravity.END
+      y = dp(50) // below the status bar
+      x = dp(14)
+    }
+    try {
+      wm?.addView(chip, params)
+      cornerView = chip
+      updateCorner()
+      startCornerTick()
+    } catch (_: Throwable) {
+      cornerView = null
+      cornerText = null
+    }
+  }
+
+  private fun hideCorner() {
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+      main.post { hideCorner() }
+      return
+    }
+    cornerTargetAt = 0L
+    cornerView?.let { try { wm?.removeView(it) } catch (_: Throwable) { } }
+    cornerView = null
+    cornerText = null
+    stopCornerTick()
+  }
+
+  private val cornerTick = object : Runnable {
+    override fun run() {
+      updateCorner()
+      main.postDelayed(this, 1000)
+    }
+  }
+  private fun startCornerTick() {
+    main.removeCallbacks(cornerTick)
+    main.post(cornerTick)
+  }
+  private fun stopCornerTick() {
+    main.removeCallbacks(cornerTick)
+  }
+
+  private fun updateCorner() {
+    // Pre-warning window: count down to a session that has NOT started yet.
+    // In-session: count down to the session end (prefs.endsAt).
+    var target = cornerTargetAt
+    var prefix = "SEAL IN "
+    if (prefs.getBoolean("active", false)) {
+      target = parseIso(prefs.getString("endsAt", "") ?: "")
+      prefix = ""
+    }
+    if (target <= 0L) { hideCorner(); return }
+    val ms = (target - serverNowMillis()).coerceAtLeast(0L)
+    val total = ms / 1000
+    val mm = total / 60
+    val ss = total % 60
+    cornerText?.text = prefix + String.format("%02d:%02d", mm, ss)
+    // If the pre-warning target has passed and the session isn't armed yet,
+    // hide the chip (the full-screen barrier takes over).
+    if (cornerTargetAt > 0L && ms <= 0L && !prefs.getBoolean("active", false)) {
+      hideCorner()
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Idle keep-alive watchdog
+  // ------------------------------------------------------------------
+
+  private val idleWatchdog = object : Runnable {
+    override fun run() {
+      try { tickIdle() } catch (_: Throwable) { }
+      workerH.postDelayed(this, IDLE_TICK_MS)
+    }
+  }
+
+  private fun startIdleWatchdog() {
+    workerH.removeCallbacks(watchdog)
+    workerH.removeCallbacks(idleWatchdog)
+    workerH.post(idleWatchdog)
+  }
+
+  private fun tickIdle() {
+    // Already enforcing — the active watchdog takes over.
+    if (prefs.getBoolean("active", false)) {
+      startWatchdog()
+      return
+    }
+    val apiBase = (prefs.getString("apiBase", "") ?: "").trimEnd('/')
+    val token = prefs.getString("token", "") ?: ""
+    if (apiBase.isEmpty() || token.isEmpty()) return
+    // Self-arm from the timetable: if the server says a session is active for
+    // this device and we are not already enforcing, arm it. This is what makes
+    // auto-activation work even when JS has not run the 4s sync loop.
+    val res = httpGet("$apiBase/api/lockdown/current", token)
+    if (res == null) return
+    if (res.status == 401 || res.status == 403) {
+      Bridge.emit("unauthorized")
+      return
+    }
+    val body = try { JSONObject(res.body) } catch (_: Throwable) { null } ?: return
+    body.optString("server_time", "").let { if (it.isNotEmpty()) applyServerClock(it) }
+    val active = body.optBoolean("active", false)
+    val sessionId = body.optString("session_id", "")
+    // Only auto-arm if the accessibility service is actually on — otherwise the
+    // session would flip to "active" yet still not intercept anything.
+    if (active && sessionId.isNotEmpty() && !prefs.getBoolean("active", false) && isAccessibilityOn()) {
+      val endsAt = body.optString("end_time", "")
+      if (endsAt.isNotEmpty()) {
+        val t = parseIso(endsAt)
+        if (t > 0L) prefs.edit().putString("endsAt", endsAt).apply()
+      }
+      val subject = body.optString("subject", "")
+      val title = if (subject.isNotEmpty()) "Deep Work · $subject" else "Deep Work"
+      prefs.edit()
+        .putBoolean("active", true)
+        .putString("sessionId", sessionId)
+        .putString("subject", subject)
+        .putString("title", title)
+        .apply()
+      showOverlay()
+      startWatchdog()
+    }
   }
 
   // ------------------------------------------------------------------
@@ -434,6 +654,12 @@ class LockdownOverlayService : Service() {
           this, "accessibilityOff", "tamper_detected",
           "The accessibility (seal) service was switched off during a sealed session."
         )
+        // HARD-FALLBACK: without the accessibility service we cannot tell a
+        // safe app from a blocked one, so the only safe decision is to lock
+        // the whole phone. Raise the full-screen seal and keep it there until
+        // the session ends. This turns "switch off accessibility" into a
+        // fully-locked device instead of a free pass.
+        main.post { if (overlay == null) showOverlay() }
       }
     }
 
@@ -460,12 +686,12 @@ class LockdownOverlayService : Service() {
   private fun stopEverything() {
     prefs.edit().putBoolean("active", false).apply()
     if (Looper.myLooper() != Looper.getMainLooper()) main.post { removeOverlay() } else removeOverlay()
+    main.post { hideCorner() }
     workerH.removeCallbacks(watchdog)
-    try {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_REMOVE)
-      else stopForeground(true)
-    } catch (_: Throwable) { }
-    stopSelf()
+    // Re-arm the idle watchdog so the keep-alive + auto-activation continues
+    // between sessions (the student must NOT have to reopen the app).
+    startIdleWatchdog()
+    updateOngoingNotification()
   }
 
   /** Watchdog detected the session is over server-side (or the token died). */
@@ -473,11 +699,9 @@ class LockdownOverlayService : Service() {
     Bridge.emit(reason)
     prefs.edit().putBoolean("active", false).apply()
     main.post { removeOverlay() }
-    try {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_REMOVE)
-      else stopForeground(true)
-    } catch (_: Throwable) { }
-    stopSelf()
+    main.post { hideCorner() }
+    startIdleWatchdog()
+    updateOngoingNotification()
   }
 
   // ------------------------------------------------------------------
@@ -531,6 +755,23 @@ class LockdownOverlayService : Service() {
   // Misc
   // ------------------------------------------------------------------
 
+  private fun isAccessibilityOn(): Boolean {
+    return try {
+      val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
+      val list = am.getEnabledAccessibilityServiceList(
+        android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK
+      )
+      val me = android.content.ComponentName(this, LockdownAccessibilityService::class.java).flattenToString()
+      list.any {
+        it.resolveInfo.serviceInfo.let { s ->
+          android.content.ComponentName(s.packageName, s.name).flattenToString()
+        } == me
+      }
+    } catch (_: Throwable) {
+      false
+    }
+  }
+
   private fun parseIso(value: String): Long {
     // Naive server timestamps are UTC. No java.time — works on all min SDKs.
     if (value.isBlank()) return 0L
@@ -566,12 +807,16 @@ class LockdownOverlayService : Service() {
   }
 
   private fun buildNotification(): Notification {
+    val sealed = prefs.getBoolean("active", false)
     val builder =
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(this, CHANNEL)
       else Notification.Builder(this)
     return builder
       .setContentTitle("BT LOCKDOWN")
-      .setContentText("Deep Work is sealed. Distracting apps are intercepted.")
+      .setContentText(
+        if (sealed) "Deep Work is sealed. Distracting apps are intercepted."
+        else "Standing by — auto-locks on your AI timetable."
+      )
       .setSmallIcon(android.R.drawable.ic_lock_lock)
       .setOngoing(true)
       .setCategory(Notification.CATEGORY_SERVICE)
@@ -593,6 +838,14 @@ class LockdownOverlayService : Service() {
       .build()
   }
 
+  /** Refresh the persistent notification (sealed vs. standing by, and while armed). */
+  private fun updateOngoingNotification() {
+    try {
+      val nm = getSystemService(NotificationManager::class.java) ?: return
+      nm.notify(NOTIF_ID, buildNotification())
+    } catch (_: Throwable) { }
+  }
+
   companion object {
     const val PREFS = "bt.lockdown"
     private const val CHANNEL = "bt_lockdown"
@@ -600,7 +853,11 @@ class LockdownOverlayService : Service() {
     private const val ACTION_STOP = "com.btsoftware.lockdown.STOP"
     const val ACTION_SHOW = "com.btsoftware.lockdown.SHOW"
     const val ACTION_HIDE = "com.btsoftware.lockdown.HIDE"
+    const val ACTION_CORNER = "com.btsoftware.lockdown.CORNER"
+    const val ACTION_CORNER_OFF = "com.btsoftware.lockdown.CORNER_OFF"
+    const val ACTION_IDLE = "com.btsoftware.lockdown.IDLE"
     private const val GRACE_MS = 90_000L
+    private const val IDLE_TICK_MS = 20_000L
 
     @Volatile
     var running = false
@@ -616,12 +873,33 @@ class LockdownOverlayService : Service() {
       }
     }
 
+    /** Keep-alive: start the watchdog in idle mode so auto-activation works. */
+    fun startIdle(ctx: Context) {
+      if (running) {
+        send(ctx, ACTION_IDLE)
+      } else {
+        start(ctx)
+        send(ctx, ACTION_IDLE)
+      }
+    }
+
     fun show(ctx: Context) {
       send(ctx, ACTION_SHOW)
     }
 
     fun hide(ctx: Context) {
       send(ctx, ACTION_HIDE)
+    }
+
+    /** Show the corner countdown chip counting to targetAt (epoch ms). */
+    fun corner(ctx: Context, targetAt: Long) {
+      val i = Intent(ctx, LockdownOverlayService::class.java).setAction(ACTION_CORNER)
+        .putExtra("targetAt", targetAt)
+      sendIntent(i, ctx)
+    }
+
+    fun cornerOff(ctx: Context) {
+      send(ctx, ACTION_CORNER_OFF)
     }
 
     fun stop(ctx: Context) {
@@ -632,14 +910,17 @@ class LockdownOverlayService : Service() {
     }
 
     private fun send(ctx: Context, action: String) {
+      val i = Intent(ctx, LockdownOverlayService::class.java).setAction(action)
+      sendIntent(i, ctx)
+    }
+
+    private fun sendIntent(i: Intent, ctx: Context) {
       if (running) {
-        val i = Intent(ctx, LockdownOverlayService::class.java).setAction(action)
         try { ctx.startService(i) } catch (_: Throwable) { }
       } else {
         // Service is not running: start it (default action boots the watchdog),
-        // then deliver the show/hide intent — Android queues both in order.
+        // then deliver the intent — Android queues both in order.
         start(ctx)
-        val i = Intent(ctx, LockdownOverlayService::class.java).setAction(action)
         try { ctx.startService(i) } catch (_: Throwable) { }
       }
     }
