@@ -16,6 +16,13 @@ import android.content.Intent
  * enforcement. The watchdog itself talks to the server, so an expired
  * or server-ended session self-cleans within a few seconds — booting
  * with a stale "active" flag is safe.
+ *
+ * Android 15/16 note: the watchdog uses the specialUse foreground service
+ * type, which is NOT on the BOOT_COMPLETED launch-ban list (dataSync,
+ * camera, mediaPlayback, phoneCall, mediaProjection, microphone). With
+ * dataSync, a reboot mid-session on Android 15+ would throw
+ * ForegroundServiceStartNotAllowedException and the seal would silently
+ * die until the student reopened the app.
  */
 class BootReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {

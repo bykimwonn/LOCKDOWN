@@ -52,8 +52,26 @@ function withBTLockdown(config) {
         $: {
           'android:name': 'com.btsoftware.lockdown.LockdownOverlayService',
           'android:exported': 'false',
-          'android:foregroundServiceType': 'dataSync',
+          // specialUse, NOT dataSync. Android 15+ (apps targeting API 35+):
+          //  - dataSync foreground services are capped at 6h per 24h and may
+          //    NOT be launched from a BOOT_COMPLETED receiver, which would
+          //    kill the post-reboot watchdog restart.
+          //  - specialUse has no time limit and is not on the boot-restricted
+          //    list, so BootReceiver keeps working on Android 15/16.
+          'android:foregroundServiceType': 'specialUse',
         },
+        // Play Console / OS review label for the specialUse type. This app is
+        // a student device lock: session enforcement + server synchronization
+        // that must keep running while the phone is backgrounded/sealed.
+        property: [
+          {
+            $: {
+              'android:name': 'android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE',
+              'android:value':
+                'Student device lockdown: seals the device during teacher-assigned Deep Work sessions and keeps the session watchdog + BT LEARNING sync running while the app is backgrounded.',
+            },
+          },
+        ],
       });
     }
 
@@ -104,10 +122,15 @@ function withBTLockdown(config) {
     // XML builder would then wrap the whole file in an extra <root> element,
     // producing an invalid manifest that breaks `expo prebuild`/EAS builds.
     const perms = doc['uses-permission'] ?? [];
-    if (!perms.some((p) => p.$ && p.$['android:name'] === 'android.permission.RECEIVE_BOOT_COMPLETED')) {
-      perms.push({ $: { 'android:name': 'android.permission.RECEIVE_BOOT_COMPLETED' } });
-      doc['uses-permission'] = perms;
-    }
+    const ensurePerm = (name) => {
+      if (!perms.some((p) => p.$ && p.$['android:name'] === name)) {
+        perms.push({ $: { 'android:name': name } });
+      }
+    };
+    ensurePerm('android.permission.RECEIVE_BOOT_COMPLETED');
+    // specialUse foreground service (Android 14+ requires a type permission).
+    ensurePerm('android.permission.FOREGROUND_SERVICE_SPECIAL_USE');
+    doc['uses-permission'] = perms;
 
     // Guard: the parsed document is `{ manifest: { … } }`, so `manifest` must stay the
     // ONLY top-level key. Any sibling (e.g. a `uses-permission` written on modResults)

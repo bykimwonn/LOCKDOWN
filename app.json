@@ -40,7 +40,7 @@
         "android.permission.VIBRATE",
         "android.permission.WAKE_LOCK",
         "android.permission.FOREGROUND_SERVICE",
-        "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+        "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
         "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
       ]
     },

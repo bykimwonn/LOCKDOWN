@@ -12,6 +12,7 @@
     "lint": "tsc --noEmit",
     "test": "jest",
     "test:contract": "node scripts/check-contract.mjs",
+    "test:live-api": "node scripts/check-live-api.mjs",
     "test:manifest": "node scripts/check-android-manifest.mjs"
   },
   "dependencies": {

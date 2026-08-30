@@ -225,7 +225,7 @@ Note: iOS enforcement is intentionally disabled in this build — sync works, bl
    - Shield apps
    - Violations
 
-**Polling:** App hits `/api/lockdown/sync` every 4 seconds. When Deep Work is active on website, phone auto-seals (HOME + overlay barrier).
+**Polling:** App hits `/api/lockdown/sync` every 4 seconds. When Deep Work is active on website, phone auto-seals (HOME + overlay barrier). See `ANDROID_15_16.md` for Android 15/16 support, 16 KB compliance and the Expo SDK 54 upgrade path.
 
 ---
 
