@@ -399,6 +399,67 @@ Note: the `ANDROID_NDK_HOME environment variable was not specified` and `npm
 warn deprecated ...` lines earlier in the log are harmless — ignore them. The
 build only fails because of the Java version.
 
+**11. `eas build --local` fails with `SDK location not found` and `Could not get
+unknown property 'release'`**
+
+→ The `release` error is just a **follow-on** of the first one: your machine has
+no Android SDK path configured, so Expo's native modules can't configure and
+Gradle aborts. Fix by pointing `ANDROID_HOME` at the Android SDK:
+
+```bash
+# 1. Find an existing SDK (one of these usually exists in Codespaces):
+ls -d /usr/local/lib/android/sdk /usr/local/android-sdk /opt/android-sdk \
+  /usr/lib/android-sdk ~/Android/Sdk "$HOME/android-sdk" 2>/dev/null
+find /usr /opt /home -maxdepth 5 -name sdkmanager -type f 2>/dev/null | head
+
+# 2. If one exists, point the build at it:
+export ANDROID_HOME=/usr/local/lib/android/sdk      # <-- use the path you found
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+
+# 3. Verify it has what SDK 52 needs (compileSdk 35, build-tools 35, NDK 26):
+ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools" "$ANDROID_HOME/ndk" 2>/dev/null
+
+# 4. Rebuild — env vars are inherited by the EAS local build:
+eas build --local --platform android
+```
+
+**If no SDK exists, install one (run in GitHub Codespaces / any Linux):**
+
+```bash
+# ~/.android-sdk/cmdline-tools/latest
+mkdir -p "$HOME/android-sdk/cmdline-tools"
+cd "$HOME/android-sdk/cmdline-tools"
+curl -fsSL -o tools.zip \
+  https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+unzip -q tools.zip && rm tools.zip && mv cmdline-tools latest
+
+export ANDROID_HOME="$HOME/android-sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+
+# Accept licenses and install what React Native 0.76 / Expo SDK 52 needs:
+yes | sdkmanager --licenses
+sdkmanager "platform-tools" \
+  "platforms;android-35" \
+  "build-tools;35.0.0" \
+  "ndk;26.1.10909125"   # ~700 MB, this is the slow step
+
+eas build --local --platform android
+```
+
+To make the SDK + JDK sticky for every new terminal, append to `~/.bashrc`:
+
+```bash
+export JAVA_HOME="$HOME/.sdkman/candidates/java/17.0.13-tem"
+export ANDROID_HOME="$HOME/android-sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+```
+
+then open a **new terminal** and confirm:
+`java -version` → 17.x, `echo $ANDROID_HOME` → your SDK path.
+
 ---
 
 ## 11) Quick Command Cheat Sheet
