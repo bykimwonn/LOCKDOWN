@@ -551,7 +551,8 @@ class LockdownOverlayService : Service() {
         if (launch != null) {
           b.setContentIntent(
             android.app.PendingIntent.getActivity(
-              this, 0, launch, android.app.PendingIntent.FLAG_UPDATE_CURRENT
+              this, 0, launch,
+              android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
             )
           )
         }
