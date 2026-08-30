@@ -4,6 +4,12 @@
     "slug": "bt-lockdown",
     "owner": "bingen",
     "version": "1.0.0",
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/6ba262dd-d81c-4184-b214-a2911dad08b0"
+    },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "btlockdown",
