@@ -9,6 +9,9 @@ type NativeLockdown = {
   requestBatteryExemption: () => Promise<boolean>;
   requestDeviceAdmin: () => Promise<boolean>;
   openAutostartSettings: () => Promise<boolean>;
+  startBackgroundGuard: () => Promise<boolean>;
+  showCornerTimer: (targetAt: number) => Promise<boolean>;
+  hideCornerTimer: () => Promise<boolean>;
   getPermissionStatus: () => Promise<PermissionStatus>;
   getDeviceGuard: () => Promise<DeviceGuard>;
   activate: (payload: {
@@ -130,6 +133,26 @@ export const LockdownNative = {
 
   async openAutostartSettings() {
     if (LINKED?.openAutostartSettings) return LINKED.openAutostartSettings();
+    return false;
+  },
+
+  /**
+   * Keep the native enforcement service alive in the background (idle) so the
+   * app can auto-activate on its AI timetable without the student reopening it.
+   */
+  async startBackgroundGuard() {
+    if (LINKED?.startBackgroundGuard) return LINKED.startBackgroundGuard();
+    return false;
+  },
+
+  /** Show the corner countdown chip counting down to targetAt (epoch ms). */
+  async showCornerTimer(targetAt: number) {
+    if (LINKED?.showCornerTimer) return LINKED.showCornerTimer(targetAt);
+    return false;
+  },
+
+  async hideCornerTimer() {
+    if (LINKED?.hideCornerTimer) return LINKED.hideCornerTimer();
     return false;
   },
 

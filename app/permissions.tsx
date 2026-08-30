@@ -139,15 +139,60 @@ export default function Permissions() {
         </View>
       )}
       <Button
-        title={ios ? 'Continue (sync only)' : busy ? 'Arming…' : 'Enter BT LOCKDOWN'}
+        title={
+          ios
+            ? 'Continue (sync only)'
+            : busy
+              ? 'Arming…'
+              : a11yOk && overlayOk
+                ? 'Enter BT LOCKDOWN'
+                : a11yOk
+                  ? 'Grant overlay to continue'
+                  : 'Enable Accessibility to continue'
+        }
         onPress={go}
         disabled={busy}
       />
       {!ios && !a11yOk ? (
-        <Text style={styles.fine}>
-          Without the accessibility service the phone can sync with BT LEARNING but cannot block
-          apps. You can enter now and come back from the System tab.
-        </Text>
+        <Card style={{ marginTop: 12, borderColor: colors.crimson }}>
+          <Text style={styles.fine}>
+            You cannot enter until the Accessibility service is ON. This is the only thing that
+            actually intercepts distracting apps — without it the phone syncs with BT LEARNING but
+            cannot seal itself.
+          </Text>
+          <Text
+            style={styles.linkLine}
+            onPress={() => {
+              setBusy(true);
+              LockdownNative.requestAccessibility()
+                .then(() => void refreshPermissionStatus())
+                .catch(() => undefined)
+                .finally(() => setBusy(false));
+            }}
+          >
+            Open Accessibility settings ›
+          </Text>
+        </Card>
+      ) : null}
+      {!ios && a11yOk && !overlayOk ? (
+        <Card style={{ marginTop: 12, borderColor: colors.crimson }}>
+          <Text style={styles.fine}>
+            One more step: allow BT LOCKDOWN to display over other apps. That Permission is what
+            draws the full-screen seal over a blocked app.
+          </Text>
+          <Text
+            style={styles.linkLine}
+            onPress={() => {
+              setBusy(true);
+              LockdownNative.requestOverlay()
+                .then(() => void refreshPermissionStatus())
+                .catch(() => undefined)
+                .finally(() => setBusy(false));
+            }}
+          >
+            Open Overlay settings ›
+          </Text>
+        </Card>
       ) : null}
     </View>
   );
@@ -201,10 +246,14 @@ const styles = StyleSheet.create({
   warnT: { fontFamily: fonts.sans, color: colors.crimson, fontSize: 13, lineHeight: 19 },
   fine: {
     fontFamily: fonts.sans,
-    color: colors.inkFaint,
-    fontSize: 12,
-    textAlign: 'center',
-    marginTop: 12,
-    lineHeight: 18,
+    color: colors.inkMute,
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  linkLine: {
+    fontFamily: fonts.sansSemi,
+    color: colors.amber,
+    fontSize: 14,
+    marginTop: 8,
   },
 });

@@ -9,7 +9,7 @@ import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function Command() {
-  const { user, sessions, lockdown, syncOk, lastSyncAt, startManualFocus } = useApp();
+  const { user, sessions, lockdown, syncOk, lastSyncAt, startManualFocus, linkOk } = useApp();
   const inset = useSafeAreaInsets();
   const [, setTick] = useState(0);
 
@@ -38,7 +38,14 @@ export default function Command() {
           <Label tone="amber">BT LOCKDOWN</Label>
           <Text style={styles.hi}>{user?.name?.split(' ')[0] ?? 'Student'}</Text>
         </View>
-        <Pill color={syncOk ? colors.mint : colors.crimson}>{syncOk ? 'SYNC LIVE' : 'SYNC DOWN'}</Pill>
+        <View style={{ alignItems: 'flex-end', gap: 6 }}>
+          <Pill color={linkOk ? colors.mint : colors.crimson}>
+            {linkOk ? '● LINKED' : '● OFFLINE'}
+          </Pill>
+          <Pill color={syncOk ? colors.mint : colors.crimson}>
+            {syncOk ? 'SYNC LIVE' : 'SYNC DOWN'}
+          </Pill>
+        </View>
       </View>
 
       <View style={styles.ringWrap}>

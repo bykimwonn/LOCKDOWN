@@ -190,6 +190,10 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
       .putBoolean("adminActive", isAdminActive())
       .apply()
     LockdownOverlayService.start(ctx)
+    // Show the corner countdown for the session's remaining time even if the
+    // full-screen barrier is not currently raised (e.g. student is in a safe app).
+    val endsAt = parseIsoSafe(payload.getString("endsAt"))
+    if (endsAt > 0L) LockdownOverlayService.corner(ctx, endsAt)
     promise.resolve(true)
   }
 
@@ -214,7 +218,28 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
   fun deactivate(promise: Promise) {
     ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .edit().putBoolean("active", false).apply()
+    LockdownOverlayService.cornerOff(ctx)
     LockdownOverlayService.stop(ctx)
+    promise.resolve(true)
+  }
+
+  /** Start the keep-alive idle watchdog so the app auto-activates on timetable. */
+  @ReactMethod
+  fun startBackgroundGuard(promise: Promise) {
+    LockdownOverlayService.startIdle(ctx)
+    promise.resolve(true)
+  }
+
+  /** Show the corner countdown chip counting down to targetAt (epoch ms). */
+  @ReactMethod
+  fun showCornerTimer(targetAt: Double, promise: Promise) {
+    LockdownOverlayService.corner(ctx, targetAt.toLong())
+    promise.resolve(true)
+  }
+
+  @ReactMethod
+  fun hideCornerTimer(promise: Promise) {
+    LockdownOverlayService.cornerOff(ctx)
     promise.resolve(true)
   }
 
@@ -242,6 +267,21 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     val manufacturer = (Build.MANUFACTURER ?: "").lowercase()
     return brand.contains("xiaomi") || brand.contains("redmi") ||
       manufacturer.contains("xiaomi") || manufacturer.contains("redmi")
+  }
+
+  /** Parse a UTC ISO timestamp to epoch ms. Returns 0 on failure. */
+  private fun parseIsoSafe(value: String?): Long {
+    if (value.isNullOrBlank()) return 0L
+    return try {
+      val raw = value.trim().replace(' ', 'T')
+      val noZone = raw.substringBefore('Z').substringBefore('+').substringBefore('.')
+      val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).apply {
+        timeZone = java.util.TimeZone.getTimeZone("UTC")
+      }
+      fmt.parse(noZone)?.time ?: 0L
+    } catch (_: Throwable) {
+      0L
+    }
   }
 
   private fun isAdminActive(): Boolean {

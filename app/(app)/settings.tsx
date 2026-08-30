@@ -7,7 +7,7 @@ import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function Settings() {
-  const { user, permissions, refreshPermissionStatus, syncOk, lastSyncAt, signOut, apiBase, enforcementAvailable } = useApp();
+  const { user, permissions, refreshPermissionStatus, syncOk, lastSyncAt, signOut, apiBase, enforcementAvailable, linkOk } = useApp();
   const inset = useSafeAreaInsets();
   const [guard, setGuard] = useState<DeviceGuard | null>(null);
 
@@ -53,13 +53,23 @@ export default function Settings() {
 
       <Label style={{ marginTop: 22, marginBottom: 10 }}>Sync bridge</Label>
       <Card>
-        <Row k="BT LEARNING" v={syncOk ? 'Live' : 'Unreachable'} />
-        <Hairline />
-        <Row k="API" v={apiBase || 'not set'} />
+        <View style={[styles.linkRow, { borderColor: linkOk ? colors.mint : colors.crimson }]}>
+          <View style={[styles.linkDot, { backgroundColor: linkOk ? colors.mint : colors.crimson }]} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.linkT}>BT LEARNING ↔ BT LOCKDOWN</Text>
+            <Text style={styles.linkS}>
+              {linkOk
+                ? 'Strong link — timetables, penalties and lockouts sync live.'
+                : 'Link interrupted — the app will still hold its own seal and re-sync when the server is reachable.'}
+            </Text>
+          </View>
+        </View>
         <Hairline />
         <Row k="Last flag" v={lastSyncAt ? lastSyncAt.slice(11, 19) + 'Z' : '—'} />
         <Hairline />
         <Row k="Clock authority" v="Server time only" />
+        <Hairline />
+        <Row k="Auto-lock" v="On AI timetable" />
         <Hairline />
         <Row k="Native module" v={LockdownNative.available ? 'Linked' : 'JS fallback'} />
       </Card>
@@ -156,4 +166,15 @@ const styles = StyleSheet.create({
   v: { fontFamily: fonts.sansMed, color: colors.ink, fontSize: 14, flexShrink: 1, textAlign: 'right' },
   link: { color: colors.amber },
   warn: { fontFamily: fonts.sans, color: colors.crimson, fontSize: 13, lineHeight: 19 },
+  linkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+  },
+  linkDot: { width: 14, height: 14, borderRadius: 7 },
+  linkT: { fontFamily: fonts.sansSemi, color: colors.ink, fontSize: 14 },
+  linkS: { fontFamily: fonts.sans, color: colors.inkMute, fontSize: 12, lineHeight: 18, marginTop: 2 },
 });
