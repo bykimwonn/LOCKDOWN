@@ -15,7 +15,10 @@ const path = require('path');
  */
 function withBTLockdown(config) {
   config = withAndroidManifest(config, (cfg) => {
+    // modResults is the whole XML *document*: { manifest: { $, uses-permission, application, … } }.
+    // `app` is the <application> element; `doc` is the <manifest> element itself.
     const manifest = cfg.modResults;
+    const doc = manifest.manifest ?? manifest;
     const app = AndroidConfig.Manifest.getMainApplicationOrThrow(manifest);
     if (!app.service) app.service = [];
     if (!app.receiver) app.receiver = [];
@@ -96,10 +99,31 @@ function withBTLockdown(config) {
     }
 
     // BOOT_COMPLETED is a normal install-time permission.
-    const perms = manifest['uses-permission'] ?? [];
+    // It must go INSIDE <manifest>, i.e. on doc['uses-permission'].
+    // Writing it on modResults would put it next to the `manifest` key, and the
+    // XML builder would then wrap the whole file in an extra <root> element,
+    // producing an invalid manifest that breaks `expo prebuild`/EAS builds.
+    const perms = doc['uses-permission'] ?? [];
     if (!perms.some((p) => p.$ && p.$['android:name'] === 'android.permission.RECEIVE_BOOT_COMPLETED')) {
       perms.push({ $: { 'android:name': 'android.permission.RECEIVE_BOOT_COMPLETED' } });
-      manifest['uses-permission'] = perms;
+      doc['uses-permission'] = perms;
+    }
+
+    // Guard: the parsed document is `{ manifest: { … } }`, so `manifest` must stay the
+    // ONLY top-level key. Any sibling (e.g. a `uses-permission` written on modResults)
+    // makes the XML writer emit `<root><manifest>…</manifest><uses-permission/></root>`,
+    // and the build then dies much later with the unhelpful
+    // "Invalid manifest found at: android/app/src/main/AndroidManifest.xml" from the
+    // expo-updates channel step. Fail here, at the real cause, instead.
+    if (manifest.manifest) {
+      const stray = Object.keys(manifest).filter((k) => k !== 'manifest' && !k.startsWith('_'));
+      if (stray.length) {
+        throw new Error(
+          'withBTLockdown: the AndroidManifest mod left ' +
+            stray.map((k) => `<${k}>`).join(', ') +
+            ' outside <manifest>. Mutate cfg.modResults.manifest[...] (not cfg.modResults[...]) in plugins/withBTLockdown.js.'
+        );
+      }
     }
 
     return cfg;
