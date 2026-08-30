@@ -9,8 +9,12 @@ This is the live BT LOCKDOWN phone app. It connects to your TEACHING website (BT
 ### Required software:
 1. **Node.js 18 or 20 LTS** - https://nodejs.org (check with `node -v`)
 2. **Git** - https://git-scm.com (check with `git --version`)
-3. **VS Code** or any code editor
-4. For Android testing:
+3. **JDK 17 (Temurin recommended)** - https://adoptium.net (check with `java -version`)
+   - Required for `eas build --local` and `npx expo run:android`. Gradle 8.10.2
+     (used by Expo SDK 52) **cannot run on JDK 25** — if `java -version` says 25,
+     your local build fails. See Common Issue #10.
+4. **VS Code** or any code editor
+5. For Android testing:
    - **Android Studio** + Android SDK + Emulator, OR
    - A real Android phone with **Expo Go** app (Play Store) for quick UI test, but native lockdown won't work in Expo Go — you need a dev build for full features.
    - **EAS CLI** for building APK: `npm install -g eas-cli`
@@ -352,6 +356,109 @@ If it comes back after you edit a plugin, run:
 ```bash
 npx expo prebuild -p android --no-install --clean && npm run test:manifest
 ```
+
+**10. `eas build --local` fails with `Unsupported class file major version 69`**
+→ Your terminal's default Java is **JDK 25** (class file major version 69). Expo SDK 52's
+Gradle 8.10.2 cannot run on JDK 25, so the build dies before it even compiles. This is a
+**toolchain version mismatch — nothing wrong with the app code.**
+
+Switch to **JDK 17** (what Expo SDK 52 / React Native 0.76 expects) and rebuild:
+
+```bash
+# 1. Confirm the problem — this must print 17.x, not 25.x
+java -version
+
+# 2. Find installed JDKs (GitHub Codespaces usually has several)
+ls /usr/lib/jvm
+
+# 3A. If SDKMAN is installed (default in GitHub Codespaces):
+sdk list java
+sdk install java 17.0.13-tem
+sdk use java 17.0.13-tem          # this terminal only
+sdk default java 17.0.13-tem      # every new terminal (recommended)
+
+# 3B. Or point JAVA_HOME straight at an installed JDK 17:
+export JAVA_HOME=/usr/lib/jvm/msopenjdk-17-amd64   # adjust path to your JDK 17
+export PATH="$JAVA_HOME/bin:$PATH"
+
+# 4. Verify before rebuilding
+java -version          # must show 17.x
+echo "$JAVA_HOME"      # must not be empty
+
+# 5. Kill any old Gradle daemon, then rebuild
+pkill -f gradle || true
+eas build --local --platform android
+```
+
+Shortcut to skip the whole problem: use a cloud build instead —
+`eas build --platform android --profile production` (EAS runs it in its own
+container with the correct JDK). Local builds are the only ones affected by your
+machine's Java version.
+
+Note: the `ANDROID_NDK_HOME environment variable was not specified` and `npm
+warn deprecated ...` lines earlier in the log are harmless — ignore them. The
+build only fails because of the Java version.
+
+**11. `eas build --local` fails with `SDK location not found` and `Could not get
+unknown property 'release'`**
+
+→ The `release` error is just a **follow-on** of the first one: your machine has
+no Android SDK path configured, so Expo's native modules can't configure and
+Gradle aborts. Fix by pointing `ANDROID_HOME` at the Android SDK:
+
+```bash
+# 1. Find an existing SDK (one of these usually exists in Codespaces):
+ls -d /usr/local/lib/android/sdk /usr/local/android-sdk /opt/android-sdk \
+  /usr/lib/android-sdk ~/Android/Sdk "$HOME/android-sdk" 2>/dev/null
+find /usr /opt /home -maxdepth 5 -name sdkmanager -type f 2>/dev/null | head
+
+# 2. If one exists, point the build at it:
+export ANDROID_HOME=/usr/local/lib/android/sdk      # <-- use the path you found
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+
+# 3. Verify it has what SDK 52 needs (compileSdk 35, build-tools 35, NDK 26):
+ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools" "$ANDROID_HOME/ndk" 2>/dev/null
+
+# 4. Rebuild — env vars are inherited by the EAS local build:
+eas build --local --platform android
+```
+
+**If no SDK exists, install one (run in GitHub Codespaces / any Linux):**
+
+```bash
+# ~/.android-sdk/cmdline-tools/latest
+mkdir -p "$HOME/android-sdk/cmdline-tools"
+cd "$HOME/android-sdk/cmdline-tools"
+curl -fsSL -o tools.zip \
+  https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+unzip -q tools.zip && rm tools.zip && mv cmdline-tools latest
+
+export ANDROID_HOME="$HOME/android-sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+
+# Accept licenses and install what React Native 0.76 / Expo SDK 52 needs:
+yes | sdkmanager --licenses
+sdkmanager "platform-tools" \
+  "platforms;android-35" \
+  "build-tools;35.0.0" \
+  "ndk;26.1.10909125"   # ~700 MB, this is the slow step
+
+eas build --local --platform android
+```
+
+To make the SDK + JDK sticky for every new terminal, append to `~/.bashrc`:
+
+```bash
+export JAVA_HOME="$HOME/.sdkman/candidates/java/17.0.13-tem"
+export ANDROID_HOME="$HOME/android-sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+```
+
+then open a **new terminal** and confirm:
+`java -version` → 17.x, `echo $ANDROID_HOME` → your SDK path.
 
 ---
 
