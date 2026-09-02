@@ -1,3 +1,4 @@
+import { RefreshButton } from '@/src/components/RefreshButton';
 import { StatusRing } from '@/src/components/StatusRing';
 import { Button, Card, Label, Mono, Pill } from '@/src/components/ui';
 import { useApp } from '@/src/store/AppState';
@@ -38,13 +39,18 @@ export default function Command() {
           <Label tone="amber">BT LOCKDOWN</Label>
           <Text style={styles.hi}>{user?.name?.split(' ')[0] ?? 'Student'}</Text>
         </View>
-        <View style={{ alignItems: 'flex-end', gap: 6 }}>
-          <Pill color={linkOk ? colors.mint : colors.crimson}>
-            {linkOk ? '● LINKED' : '● OFFLINE'}
-          </Pill>
-          <Pill color={syncOk ? colors.mint : colors.crimson}>
-            {syncOk ? 'SYNC LIVE' : 'SYNC DOWN'}
-          </Pill>
+        <View style={styles.headRight}>
+          {/* Refresh the entire app: reconnect to BT LEARNING, re-pull
+              sessions + profile, re-check permissions and the native seal. */}
+          <RefreshButton />
+          <View style={{ alignItems: 'flex-end', gap: 6 }}>
+            <Pill color={linkOk ? colors.mint : colors.crimson}>
+              {linkOk ? '● LINKED' : '● OFFLINE'}
+            </Pill>
+            <Pill color={syncOk ? colors.mint : colors.crimson}>
+              {syncOk ? 'SYNC LIVE' : 'SYNC DOWN'}
+            </Pill>
+          </View>
         </View>
       </View>
 
@@ -111,6 +117,7 @@ function Stat({ k, v, c }: { k: string; v: string; c: string }) {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   head: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  headRight: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
   hi: { fontFamily: fonts.sansBold, color: colors.ink, fontSize: 26, marginTop: 4 },
   ringWrap: { alignItems: 'center', marginVertical: 10 },
   stats: { flexDirection: 'row', gap: 8 },
