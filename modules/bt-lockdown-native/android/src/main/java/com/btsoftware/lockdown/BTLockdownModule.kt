@@ -1,6 +1,7 @@
 package com.btsoftware.lockdown
 
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.ActivityManager
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
@@ -228,11 +229,28 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     promise.resolve(isLockTaskActive())
   }
 
+  /**
+   * Is the device currently pinned in lock-task (kiosk) mode?
+   *
+   * There is NO Activity#isInLockTaskMode — lock-task state is reported by
+   * **ActivityManager**, and referencing it on an Activity fails
+   * ':app:compileReleaseKotlin' with "unresolved reference". The two real
+   * APIs are:
+   *   - API 23+: ActivityManager.getLockTaskModeState() != LOCK_TASK_MODE_NONE
+   *   - API 21/22: ActivityManager.isInLockTaskMode() (deprecated in 23)
+   * This reads the state from the app context, so it is also correct when no
+   * Activity is on top (the seal keeps running in the background).
+   */
   private fun isLockTaskActive(): Boolean {
     return try {
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return false
-      val a = currentActivity ?: return false
-      a.isInLockTaskMode
+      val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return false
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        am.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE
+      } else {
+        @Suppress("DEPRECATION")
+        am.isInLockTaskMode
+      }
     } catch (_: Throwable) {
       false
     }
