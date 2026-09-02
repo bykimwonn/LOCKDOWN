@@ -49,6 +49,17 @@ const NON_EXISTENT_ANDROID_APIS = [
     pattern: /DevicePolicyManager\.LOCK_TASK_MODE_(PINNED|LOCKED|NONE)/,
     because: 'LOCK_TASK_MODE_* constants live on ActivityManager, not DevicePolicyManager',
   },
+  {
+    // Broke build fd392a25 (:app:compileReleaseKotlin, BTLockdownModule.kt).
+    // `activity.isInLockTaskMode` / `currentActivity?.isInLockTaskMode` are
+    // NOT Activity members. Only ActivityManager has isInLockTaskMode()
+    // (deprecated in API 23) and getLockTaskModeState() (API 23+).
+    id: 'Activity#isInLockTaskMode',
+    pattern:
+      /(?:\bactivity\b|\bcurrentActivity\b|\bval\s+a\b|\ba)\s*(?:\?)?\.\s*isInLockTaskMode|\bthis\.isInLockTaskMode\b/i,
+    because:
+      'isInLockTaskMode() is an ActivityManager method, not an Activity one — use ActivityManager.getLockTaskModeState() on API 23+',
+  },
 ];
 
 function kotlinSources() {
