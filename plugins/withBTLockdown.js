@@ -128,6 +128,10 @@ function withBTLockdown(config) {
       }
     };
     ensurePerm('android.permission.RECEIVE_BOOT_COMPLETED');
+    // Base foreground-service permission (install-time). Templates usually
+    // include it, but the always-on "BT LOCKDOWN is running" notification +
+    // watchdog must not depend on that — declare it explicitly.
+    ensurePerm('android.permission.FOREGROUND_SERVICE');
     // specialUse foreground service (Android 14+ requires a type permission).
     ensurePerm('android.permission.FOREGROUND_SERVICE_SPECIAL_USE');
     doc['uses-permission'] = perms;
