@@ -550,6 +550,15 @@ export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-t
 then open a **new terminal** and confirm:
 `java -version` → 17.x, `echo $ANDROID_HOME` → your SDK path.
 
+**10. `expo doctor` fails: "android - should NOT have additional property 'minSdkVersion' / 'compileSdkVersion' / 'targetSdkVersion'"**
+→ Since SDK 52 those three fields were REMOVED from the `android` block in `app.json`. **Do not put them back in `app.json` — `expo doctor` will fail again.** The values (min 24 / compile 35 / target 35) now live in the `expo-build-properties` entry under `plugins` in `app.json`. At prebuild it writes them into `android/gradle.properties`, which the SDK 52 Gradle template reads. To verify after `npx expo prebuild -p android`, open `android/gradle.properties` and check for:
+```
+android.minSdkVersion=24
+android.compileSdkVersion=35
+android.targetSdkVersion=35
+```
+Target 35 matters: SDK 52's default target is only 34, and Google Play requires 35+.
+
 ---
 
 ## 11) Quick Command Cheat Sheet

@@ -34,9 +34,6 @@
         "backgroundColor": "#050506"
       },
       "package": "com.btsoftware.lockdown",
-      "minSdkVersion": 24,
-      "compileSdkVersion": 35,
-      "targetSdkVersion": 35,
       "permissions": [
         "android.permission.INTERNET",
         "android.permission.POST_NOTIFICATIONS",
@@ -58,6 +55,16 @@
       "expo-router",
       "expo-font",
       "expo-asset",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 24,
+            "compileSdkVersion": 35,
+            "targetSdkVersion": 35
+          }
+        }
+      ],
       "./plugins/withBTLockdown"
     ],
     "experiments": {
