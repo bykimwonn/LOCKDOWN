@@ -104,16 +104,34 @@ object LockTaskController {
 
   /**
    * Device-owner-only: block uninstall + remove force-stop by setting the app
-   * to be a lock-task package and (on API 26+) disabling the "app is active
-   * admin" screen for tamper. Best-effort; never throws.
+   * to be a lock-task package and (on API 28+) stripping every lock-task
+   * feature except the power menu. Best-effort; never throws.
+   *
+   * There is NO DevicePolicyManager#setLockTaskModeState() and no
+   * DevicePolicyManager#LOCK_TASK_MODE_PINNED (that constant lives on
+   * ActivityManager). Calling them failed the Kotlin compile with
+   * "unresolved reference" and broke every EAS Android release build. Lock
+   * task mode is *entered* with Activity.startLockTask() (see pin()) and
+   * *configured* with setLockTaskPackages()/setLockTaskFeatures() — both real
+   * APIs, both used below.
    */
   fun harden(activity: Activity) {
     try {
       if (!isDeviceOwner(activity)) return
       registerLockTask(activity)
       val manager = dpm(activity) ?: return
-      if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-        manager.setLockTaskModeState(adminComponent(activity), DevicePolicyManager.LOCK_TASK_MODE_PINNED)
+      // Real uninstall block (API 21+): while we are device owner the seal
+      // cannot be uninstalled. Throws SecurityException if we are not owner.
+      manager.setUninstallBlocked(adminComponent(activity), activity.packageName, true)
+      // API 28+: while the device is pinned, hide home / recents / notifications
+      // and the status-bar info area. GLOBAL_ACTIONS is deliberately kept so the
+      // phone can always be powered off — a seal must never trap the student
+      // with a dead battery.
+      if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+        manager.setLockTaskFeatures(
+          adminComponent(activity),
+          DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS
+        )
       }
     } catch (_: Throwable) { }
   }
