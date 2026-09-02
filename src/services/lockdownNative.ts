@@ -35,6 +35,12 @@ type NativeLockdown = {
   }) => Promise<boolean>;
   deactivate: () => Promise<boolean>;
   isEnforcing: () => Promise<boolean>;
+  getInstalledApps: () => Promise<InstalledApp[]>;
+};
+
+export type InstalledApp = {
+  packageId: string;
+  name: string;
 };
 
 export type DeviceGuard = {
@@ -242,6 +248,19 @@ export const LockdownNative = {
   async isEnforcing() {
     if (LINKED?.isEnforcing) return LINKED.isEnforcing();
     return false;
+  },
+
+  /**
+   * Every launchable app on this device (via a MAIN/LAUNCHER <queries>
+   * declaration — no restricted permission). Used by the Shield tab's
+   * "detect apps on this phone" scan. Empty outside the real Android build.
+   */
+  async getInstalledApps(): Promise<InstalledApp[]> {
+    if (LINKED?.getInstalledApps) {
+      const apps = await LINKED.getInstalledApps().catch(() => [] as InstalledApp[]);
+      return Array.isArray(apps) ? apps : [];
+    }
+    return [];
   },
 
   /** Subscribe to native enforcement events. Returns an unsubscribe fn. */

@@ -1,3 +1,4 @@
+import { RefreshButton } from '@/src/components/RefreshButton';
 import { StatusRing } from '@/src/components/StatusRing';
 import { Body, Button, Label, Pill } from '@/src/components/ui';
 import { useApp } from '@/src/store/AppState';
@@ -5,12 +6,14 @@ import { formatRemain, serverNow } from '@/src/services/serverTime';
 import { colors, fonts } from '@/src/theme';
 import { WHITELIST } from '@/src/data/seed';
 import * as Haptics from 'expo-haptics';
+import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function LockdownScreen() {
-  const { lockdown, sessions, emergencyUnlock, enforcementAvailable } = useApp();
+  const { lockdown, sessions, emergencyUnlock, enforcementAvailable, gate } = useApp();
+  const router = useRouter();
   const inset = useSafeAreaInsets();
   const [, tick] = useState(0);
   const hold = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -21,6 +24,16 @@ export default function LockdownScreen() {
     const id = setInterval(() => tick((n) => n + 1), 250);
     return () => clearInterval(id);
   }, []);
+
+  // Exit the counting screen the moment the device is unlocked (end time,
+  // teacher release, emergency unlock, or a refresh that confirmed the seal
+  // is gone). The root Gate also routes this — this is the local guarantee
+  // so the student never has to force-stop the app to escape the timer.
+  useEffect(() => {
+    if (!lockdown.active && gate === 'app') {
+      router.replace('/(app)');
+    }
+  }, [lockdown.active, gate, router]);
 
   const session = sessions.find((s) => s.id === lockdown.sessionId);
   const end = lockdown.serverEndsAt ? Date.parse(lockdown.serverEndsAt) : 0;
@@ -54,7 +67,12 @@ export default function LockdownScreen() {
     <View style={[styles.root, { paddingTop: inset.top + 10, paddingBottom: inset.bottom + 16 }]}>
       <View style={styles.top}>
         <Pill color={colors.mint}>SEALED</Pill>
-        <Label>SERVER TIME</Label>
+        <View style={styles.topRight}>
+          <Label>SERVER TIME</Label>
+          {/* Manual re-sync — picks up an early teacher release the moment
+              it happens instead of waiting for the next poll. */}
+          <RefreshButton size={15} />
+        </View>
       </View>
       <Label tone="amber" style={{ textAlign: 'center', marginTop: 18 }}>
         {session?.subject ?? 'Deep Work'}
@@ -119,6 +137,7 @@ export default function LockdownScreen() {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#040405', paddingHorizontal: 20 },
   top: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  topRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   title: {
     fontFamily: fonts.sansBold,
     color: colors.ink,

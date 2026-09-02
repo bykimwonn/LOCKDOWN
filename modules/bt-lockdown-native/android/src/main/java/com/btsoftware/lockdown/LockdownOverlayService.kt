@@ -67,6 +67,7 @@ class LockdownOverlayService : Service() {
   private var lastHeartLostAt = 0L
   private var lastUnauthorizedAt = 0L
   private var lastAdminWarnAt = 0L
+  private var lastNotifRefreshAt = 0L
 
   // Adaptive watchdog interval: 5s while the server answers, backing off
   // to 10/20/30s on repeated failures (Tier 2). Resets on the next success.
@@ -165,6 +166,21 @@ class LockdownOverlayService : Service() {
     super.onDestroy()
   }
 
+  /**
+   * Recents-swipe resilience (Xiaomi/MIUI especially): swiping the app away
+   * kills the whole process group on many OEMs even for sticky foreground
+   * services — taking the always-on notification and the keep-alive watchdog
+   * with it. Re-launch immediately; the service re-reads every session detail
+   * from prefs on start, so this is cheap and always safe (an expired or
+   * server-ended session self-cleans within seconds of coming back).
+   */
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    super.onTaskRemoved(rootIntent)
+    try {
+      start(applicationContext)
+    } catch (_: Throwable) { }
+  }
+
   // ------------------------------------------------------------------
   // Full-screen barrier
   // ------------------------------------------------------------------
@@ -246,7 +262,7 @@ class LockdownOverlayService : Service() {
     root.addView(countText)
 
     val note = TextView(this).apply {
-      text = "This phone is sealed until the session ends.\nTap below to return to BT LOCKDOWN."
+      text = "Protected against distractions by BT LOCKDOWN.\nThis phone is sealed until the session ends.\nTap below to return to BT LOCKDOWN."
       setTextColor(Color.parseColor("#8A8A93"))
       textSize = 14f
       gravity = Gravity.CENTER
@@ -550,11 +566,19 @@ class LockdownOverlayService : Service() {
   private fun startWatchdog() {
     workerH.removeCallbacks(watchdog)
     workerH.post(watchdog)
+    // Flip the always-on notification into its SEALED form immediately.
+    updateOngoingNotification()
   }
 
   private fun tickWatchdog() {
     val active = prefs.getBoolean("active", false)
     if (!active) return
+
+    // Keep the always-on notification's sealed end-time fresh (throttled 30s).
+    if (SystemClock.elapsedRealtime() - lastNotifRefreshAt > 30_000) {
+      lastNotifRefreshAt = SystemClock.elapsedRealtime()
+      updateOngoingNotification()
+    }
 
     // 1. Local expiry — compared against the SERVER-anchored clock so a
     //    device clock rewind cannot postpone it.
@@ -635,19 +659,11 @@ class LockdownOverlayService : Service() {
       }
     }
 
-    // 4. Accessibility permission watchdog (throttled ~60s between reports)
+    // 4. Accessibility permission watchdog (throttled ~60s between reports).
+    //    Uses the robust MIUI-safe check — a stale reading here previously
+    //    could hard-seal the phone while accessibility was actually ON.
     if (SystemClock.elapsedRealtime() - lastA11yWarnAt > 60_000) {
-      val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
-      val list = am.getEnabledAccessibilityServiceList(
-        android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK
-      )
-      val me = android.content.ComponentName(this, LockdownAccessibilityService::class.java).flattenToString()
-      val on = list.any {
-        it.resolveInfo.serviceInfo.let { s ->
-          android.content.ComponentName(s.packageName, s.name).flattenToString()
-        } == me
-      }
-      if (!on) {
+      if (!isAccessibilityOn()) {
         lastA11yWarnAt = SystemClock.elapsedRealtime()
         // Durable: recorded even if JS was force-quit.
         NativeReporter.report(
@@ -755,17 +771,42 @@ class LockdownOverlayService : Service() {
   // Misc
   // ------------------------------------------------------------------
 
+  /**
+   * Robust "is our seal service actually ON" check. MIUI/HyperOS can leave
+   * the AccessibilityManager list stale right after the toggle — the app
+   * then claims accessibility is off while it is visibly ON. Cross-check
+   * the authoritative Settings.Secure ENABLED_ACCESSIBILITY_SERVICES string
+   * and match by package + class suffix (short vs long flattening differs
+   * across OEMs). Mirrors BTLockdownModule.isAccessibilityEnabled().
+   */
   private fun isAccessibilityOn(): Boolean {
-    return try {
+    val pkg = packageName
+    val cls = "LockdownAccessibilityService"
+    try {
       val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
       val list = am.getEnabledAccessibilityServiceList(
         android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK
       )
-      val me = android.content.ComponentName(this, LockdownAccessibilityService::class.java).flattenToString()
-      list.any {
-        it.resolveInfo.serviceInfo.let { s ->
-          android.content.ComponentName(s.packageName, s.name).flattenToString()
-        } == me
+      val hit = list.any { info ->
+        val si = info.resolveInfo.serviceInfo
+        si.packageName == pkg && si.name.substringAfterLast('.') == cls
+      }
+      if (hit) return true
+    } catch (_: Throwable) { }
+    return try {
+      val enabled = android.provider.Settings.Secure.getString(
+        contentResolver,
+        android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+      )
+      if (enabled.isNullOrEmpty()) {
+        false
+      } else {
+        val cn = android.content.ComponentName(this, LockdownAccessibilityService::class.java)
+        val long = cn.flattenToString()
+        val short = cn.flattenToShortString()
+        enabled.split(':').any {
+          it.equals(long, ignoreCase = true) || it.equals(short, ignoreCase = true)
+        }
       }
     } catch (_: Throwable) {
       false
@@ -794,6 +835,18 @@ class LockdownOverlayService : Service() {
     return fmt.format(java.util.Date())
   }
 
+  /** Device-local HH:mm for the sealed notification's "ends at" text. */
+  private fun formatClockHm(epochMs: Long): String {
+    return try {
+      val fmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).apply {
+        timeZone = java.util.TimeZone.getDefault()
+      }
+      fmt.format(java.util.Date(epochMs))
+    } catch (_: Throwable) {
+      ""
+    }
+  }
+
   private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
   private fun ensureChannel() {
@@ -811,14 +864,34 @@ class LockdownOverlayService : Service() {
     val builder =
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(this, CHANNEL)
       else Notification.Builder(this)
+    val title: String
+    val text: String
+    if (sealed) {
+      val endsAt = parseIso(prefs.getString("endsAt", "") ?: "")
+      title = "BT LOCKDOWN · SEALED"
+      val hm = if (endsAt > 0L) formatClockHm(endsAt) else ""
+      text =
+        if (hm.isNotEmpty()) {
+          "Deep Work in progress — ends at $hm."
+        } else {
+          "Deep Work is sealed. Distracting apps are intercepted."
+        }
+    } else {
+      // The always-on reassurance the student / parent looks for: BT LOCKDOWN
+      // is alive and will auto-seal on the AI timetable.
+      title = "BT LOCKDOWN is running"
+      text = "Protection active — auto-locks on your AI timetable. Tap to open."
+    }
     return builder
-      .setContentTitle("BT LOCKDOWN")
-      .setContentText(
-        if (sealed) "Deep Work is sealed. Distracting apps are intercepted."
-        else "Standing by — auto-locks on your AI timetable."
+      .setContentTitle(title)
+      .setContentText(text)
+      .setSmallIcon(
+        if (sealed) android.R.drawable.ic_lock_lock
+        else android.R.drawable.ic_lock_idle_lock
       )
-      .setSmallIcon(android.R.drawable.ic_lock_lock)
       .setOngoing(true)
+      .setShowWhen(false)
+      .setOnlyAlertOnce(true)
       .setCategory(Notification.CATEGORY_SERVICE)
       .let { b ->
         val launch = try {

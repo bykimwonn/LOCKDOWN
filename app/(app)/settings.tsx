@@ -1,13 +1,14 @@
 import { Button, Card, Hairline, Label, Pill } from '@/src/components/ui';
+import { SUPPORT } from '@/src/constants/support';
 import { LockdownNative, type DeviceGuard } from '@/src/services/lockdownNative';
 import { useApp } from '@/src/store/AppState';
 import { colors, fonts } from '@/src/theme';
 import { useEffect, useState } from 'react';
-import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Linking, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function Settings() {
-  const { user, permissions, refreshPermissionStatus, syncOk, lastSyncAt, signOut, apiBase, enforcementAvailable, linkOk } = useApp();
+  const { user, permissions, refreshPermissionStatus, syncOk, lastSyncAt, signOut, apiBase, enforcementAvailable, linkOk, refreshApp, refreshing } = useApp();
   const inset = useSafeAreaInsets();
   const [guard, setGuard] = useState<DeviceGuard | null>(null);
 
@@ -100,6 +101,15 @@ export default function Settings() {
         <Hairline />
         <Row k="Native module" v={LockdownNative.available ? 'Linked' : 'JS fallback'} />
       </Card>
+      <Button
+        title={refreshing ? 'Refreshing app…' : 'Refresh app now'}
+        variant="ghost"
+        style={{ marginTop: 12 }}
+        disabled={refreshing}
+        onPress={() => {
+          void refreshApp();
+        }}
+      />
 
       <Label style={{ marginTop: 22, marginBottom: 10 }}>Enforcement</Label>
       <Card>
@@ -178,13 +188,46 @@ export default function Settings() {
         </Card>
       ) : null}
 
+      <Label style={{ marginTop: 22, marginBottom: 10 }}>About & support</Label>
+      <Card>
+        <View style={[styles.linkRow, { borderColor: colors.amber }]}>
+          <View style={[styles.linkDot, { backgroundColor: colors.amber }]} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.linkT}>BUILT BY {SUPPORT.org.toUpperCase()}</Text>
+            <Text style={styles.linkS}>
+              {SUPPORT.product} is owned and maintained by {SUPPORT.ownerName} of{' '}
+              {SUPPORT.org}, companion to BT LEARNING. Having trouble — wrong lock, login,
+              or a phone quirk? Reach support directly below.
+            </Text>
+          </View>
+        </View>
+        <Hairline />
+        <Row
+          k="Calls & WhatsApp"
+          v={`${SUPPORT.phoneDisplay} ›`}
+          onPress={() => void Linking.openURL(SUPPORT.phoneTel).catch(() => undefined)}
+        />
+        <Hairline />
+        <Row
+          k="WhatsApp chat"
+          v="Message support ›"
+          onPress={() => void Linking.openURL(SUPPORT.whatsapp).catch(() => undefined)}
+        />
+        <Hairline />
+        <Row
+          k="Email"
+          v={`${SUPPORT.email} ›`}
+          onPress={() => void Linking.openURL(SUPPORT.emailMailto).catch(() => undefined)}
+        />
+      </Card>
+
       <Label style={{ marginTop: 22, marginBottom: 10 }}>Suite</Label>
       <Card>
-        <Row k="Product" v="BT LOCKDOWN 1.0.0" />
+        <Row k="Product" v={`${SUPPORT.product} ${SUPPORT.version}`} />
         <Hairline />
         <Row k="Sibling" v="BT LEARNING" />
         <Hairline />
-        <Row k="House" v="BT Software Solutions" />
+        <Row k="Owner" v={`${SUPPORT.ownerName} · ${SUPPORT.org}`} />
       </Card>
 
       <Button title="Sign out of this device" variant="ghost" onPress={signOut} style={{ marginTop: 22 }} />

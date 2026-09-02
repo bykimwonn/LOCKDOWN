@@ -19,12 +19,25 @@ function bakedDefault(): string {
 let apiBase = bakedDefault();
 let token = '';
 
+/**
+ * Students paste the BT LEARNING address in every shape imaginable —
+ * "bt-learning.onrender.com", " https://x.onrender.com/", plain names.
+ * Normalize: trim, force an https:// scheme when missing, strip trailing
+ * slashes. This is the single place every saved URL passes through.
+ */
+export function normalizeApiBase(url: string): string {
+  let u = (url || '').trim();
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
+  return u.replace(/\/+$/, '');
+}
+
 export function getApiBase() {
   return apiBase;
 }
 
 export function setApiBase(url: string) {
-  apiBase = (url || '').trim().replace(/\/$/, '');
+  apiBase = normalizeApiBase(url);
   AsyncStorage.setItem(URL_KEY, apiBase).catch(() => undefined);
 }
 
@@ -40,7 +53,7 @@ export function setToken(value: string) {
 
 export async function hydrateConfig() {
   const [u, t] = await Promise.all([AsyncStorage.getItem(URL_KEY), AsyncStorage.getItem(TOKEN_KEY)]);
-  if (u) apiBase = u.replace(/\/$/, '');
+  if (u) apiBase = normalizeApiBase(u);
   if (t) token = t;
 }
 

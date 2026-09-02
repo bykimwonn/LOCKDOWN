@@ -10,7 +10,7 @@ import React, {
 } from 'react';
 import { AppState as RNAppState, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
-import { SHIELD_APPS } from '@/src/data/seed';
+import { SHIELD_APPS, guessAppCategory } from '@/src/data/seed';
 import { getApiBase, hydrateConfig, setToken } from '@/src/config';
 import {
   completeSession,
@@ -62,6 +62,8 @@ type State = {
   missedHeartbeats: number;
   apiBase: string;
   enforcementAvailable: boolean;
+  /** True while the manual top-bar "refresh app" pass is running. */
+  refreshing: boolean;
 };
 
 type Action =
@@ -83,7 +85,8 @@ type Action =
   | { type: 'COMPLETE_SESSION'; id: string; minutes: number }
   | { type: 'HEARTBEAT'; at: string; missed?: boolean }
   | { type: 'SET_API'; apiBase: string }
-  | { type: 'SET_ENFORCEMENT'; available: boolean };
+  | { type: 'SET_ENFORCEMENT'; available: boolean }
+  | { type: 'SET_REFRESHING'; refreshing: boolean };
 
 const defaultPerms = (): PermissionStatus => ({
   screenTime: 'unavailable',
@@ -105,6 +108,7 @@ const initial: State = {
   missedHeartbeats: 0,
   apiBase: '',
   enforcementAvailable: Platform.OS === 'android',
+  refreshing: false,
 };
 
 function reducer(state: State, action: Action): State {
@@ -186,6 +190,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, apiBase: action.apiBase };
     case 'SET_ENFORCEMENT':
       return { ...state, enforcementAvailable: action.available };
+    case 'SET_REFRESHING':
+      return { ...state, refreshing: action.refreshing };
     default:
       return state;
   }
@@ -203,8 +209,24 @@ type Ctx = State & {
   startManualFocus: (minutes: number, title?: string) => Promise<void>;
   emergencyUnlock: () => Promise<void>;
   toggleApp: (id: string) => void;
+  /**
+   * Shield tab "detect apps on this phone": scans the device for launchable
+   * apps and merges anything new into the shield list. Newly detected apps
+   * arrive as blocked=true — this is the honest picture, because native
+   * enforcement is default-deny (only whitelisted apps get through). The
+   * student's real power is UNCHECKING apps they want to keep open during
+   * Deep Work. Resolves the number of newly discovered apps.
+   */
+  importDeviceApps: () => Promise<number>;
   recordAttempt: (appLabel: string) => void;
   setGate: (gate: RouteGate) => void;
+  /**
+   * Manual full-app refresh (top-bar button): one forceful reconnect pass
+   * over BT LEARNING, device permissions and the native seal — used when the
+   * link to BT LEARNING dropped or a screen looks stale. Resolves true when
+   * BT LEARNING answered.
+   */
+  refreshApp: () => Promise<boolean>;
 };
 
 const Context = createContext<Ctx | null>(null);
@@ -267,6 +289,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const lastTamperAt = useRef(0);
   const blockCounts = useRef<Map<string, number>>(new Map());
   const sessionEvents = useRef<Map<string, number>>(new Map());
+  /** Consecutive server-confirmed "session not active" readings (sync guard). */
+  const inactiveTicks = useRef(0);
+  /** Re-entrancy guard for the manual refresh button. */
+  const refreshBusy = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -434,16 +460,88 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // ------------------------------------------------------------------
-  // Sync loop: one round-trip to BT LEARNING. 4s when the server is
-  // healthy, backing off to 8/15/30s (+jitter) on repeated failures so a
-  // cold-starting Render free tier (and the battery) aren't hammered.
+  // Sync: ONE round-trip to BT LEARNING, shared by the 4s poll loop below
+  // and the manual top-bar refresh button — identical arm/disarm semantics.
+  // Resolves true when the server answered (even if it had nothing new).
+  // Never disarms on a network blip.
+  // ------------------------------------------------------------------
+  const syncOnce = useCallback(async (): Promise<boolean> => {
+    const s = stateRef.current;
+    try {
+      const result = await pullSync();
+      dispatch({ type: 'SET_SESSIONS', sessions: result.sessions });
+      dispatch({ type: 'SET_SYNC', ok: true, at: result.serverNow });
+      if (result.user) dispatch({ type: 'SET_USER', user: result.user });
+      scheduleSessionStarts(result.sessions);
+      DriveCorner.now(result.sessions, s.lockdown);
+      drainOutbox().catch(() => undefined);
+
+      // Clock tamper — throttled, matches the server's 120s threshold
+      if (clockSkewMs() > CLOCK_TAMPER_MS && Date.now() - lastTamperAt.current > TAMPER_THROTTLE_MS) {
+        lastTamperAt.current = Date.now();
+        punish('time_tamper', 'Local clock drifted more than 2 minutes from server time.');
+      }
+
+      if (result.lockdownActive && result.sessionId && !s.lockdown.active) {
+        const session =
+          result.sessions.find((x) => x.id === result.sessionId) ??
+          ({
+            id: result.sessionId,
+            title: result.title || 'Deep Work',
+            subject: result.subject || 'Study',
+            startsAt: result.startsAt ?? serverNowIso(),
+            endsAt: result.endsAt ?? new Date(Date.now() + 50 * 60000).toISOString(),
+            status: 'active',
+            source: 'timetable',
+          } as DeepWorkSession);
+        await arm(session, 'sync');
+      }
+
+      if (s.lockdown.active && s.lockdown.serverEndsAt) {
+        if (serverNow().getTime() >= Date.parse(s.lockdown.serverEndsAt)) {
+          await disarm('completed');
+        } else if (s.lockdown.sessionId && !LockdownNative.available) {
+          // JS heartbeat only when the native watchdog is not running
+          const sess = s.sessions.find((x) => x.id === s.lockdown.sessionId);
+          const beat = await pushHeartbeat(s.lockdown.sessionId, sess?.subject);
+          dispatch({ type: 'HEARTBEAT', at: serverNowIso(), missed: !beat.ok });
+        }
+      }
+
+      // Connection-lost safety: never disarm on a network blip. Only disarm
+      // a sync session when the server EXPLICITLY reports it inactive on two
+      // consecutive, successfully-parsed ticks (or the end time arrived). A
+      // single flaky {active:false} (or a temporary server fault) must not
+      // unlock the phone early — the native watchdog independently enforces
+      // the server's end_time and only unlocks at that moment.
+      if (s.lockdown.active && s.lockdown.armedBy === 'sync') {
+        if (!result.lockdownActive) {
+          inactiveTicks.current += 1;
+          if (inactiveTicks.current >= 2) await disarm('completed');
+        } else {
+          inactiveTicks.current = 0;
+        }
+      }
+      return true;
+    } catch {
+      // Network failure: leave the lock in place. Do NOT touch inactivation
+      // counters or the lockdown state — the phone stays sealed and the
+      // watchdog unlocks only when the programmed end time is reached.
+      dispatch({ type: 'SET_SYNC', ok: false, at: serverNowIso() });
+      return false;
+    }
+  }, [arm, disarm, punish]);
+
+  // ------------------------------------------------------------------
+  // Sync loop: 4s when the server is healthy, backing off to 8/15/30s
+  // (+jitter) on repeated failures so a cold-starting Render free tier
+  // (and the battery) aren't hammered.
   // ------------------------------------------------------------------
   useEffect(() => {
     if (!state.user || state.gate !== 'app') return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
-    let inactiveTicks = 0; // consecutive server-confirmed "not active" readings
 
     const backoffMs = () => {
       const base = failures >= 4 ? 30_000 : failures >= 2 ? 15_000 : failures === 1 ? 8_000 : 4_000;
@@ -452,71 +550,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
 
     const tick = async () => {
-      const s = stateRef.current;
-      try {
-        const result = await pullSync();
-        if (!alive) return;
-        failures = 0;
-        dispatch({ type: 'SET_SESSIONS', sessions: result.sessions });
-        dispatch({ type: 'SET_SYNC', ok: true, at: result.serverNow });
-        if (result.user) dispatch({ type: 'SET_USER', user: result.user });
-        scheduleSessionStarts(result.sessions);
-        DriveCorner.now(result.sessions, s.lockdown);
-        drainOutbox().catch(() => undefined);
-
-        // Clock tamper — throttled, matches the server's 120s threshold
-        if (clockSkewMs() > CLOCK_TAMPER_MS && Date.now() - lastTamperAt.current > TAMPER_THROTTLE_MS) {
-          lastTamperAt.current = Date.now();
-          punish('time_tamper', 'Local clock drifted more than 2 minutes from server time.');
-        }
-
-        if (result.lockdownActive && result.sessionId && !s.lockdown.active) {
-          const session =
-            result.sessions.find((x) => x.id === result.sessionId) ??
-            ({
-              id: result.sessionId,
-              title: result.title || 'Deep Work',
-              subject: result.subject || 'Study',
-              startsAt: result.startsAt ?? serverNowIso(),
-              endsAt: result.endsAt ?? new Date(Date.now() + 50 * 60000).toISOString(),
-              status: 'active',
-              source: 'timetable',
-            } as DeepWorkSession);
-          await arm(session, 'sync');
-        }
-
-        if (s.lockdown.active && s.lockdown.serverEndsAt) {
-          if (serverNow().getTime() >= Date.parse(s.lockdown.serverEndsAt)) {
-            await disarm('completed');
-          } else if (s.lockdown.sessionId && !LockdownNative.available) {
-            // JS heartbeat only when the native watchdog is not running
-            const sess = s.sessions.find((x) => x.id === s.lockdown.sessionId);
-            const beat = await pushHeartbeat(s.lockdown.sessionId, sess?.subject);
-            dispatch({ type: 'HEARTBEAT', at: serverNowIso(), missed: !beat.ok });
-          }
-        }
-
-        // Connection-lost safety: never disarm on a network blip. Only disarm
-        // a sync session when the server EXPLICITLY reports it inactive on two
-        // consecutive, successfully-parsed ticks (or the end time arrived). A
-        // single flaky {active:false} (or a temporary server fault) must not
-        // unlock the phone early — the native watchdog independently enforces
-        // the server's end_time and only unlocks at that moment.
-        if (s.lockdown.active && s.lockdown.armedBy === 'sync') {
-          if (!result.lockdownActive) {
-            inactiveTicks += 1;
-            if (inactiveTicks >= 2) await disarm('completed');
-          } else {
-            inactiveTicks = 0;
-          }
-        }
-      } catch {
-        failures += 1;
-        // Network failure: leave the lock in place. Do NOT touch inactivation
-        // counters or the lockdown state — the phone stays sealed and the
-        // watchdog unlocks only when the programmed end time is reached.
-        dispatch({ type: 'SET_SYNC', ok: false, at: serverNowIso() });
-      }
+      const ok = await syncOnce();
+      if (!alive) return;
+      failures = ok ? 0 : failures + 1;
       if (alive) timer = setTimeout(tick, backoffMs());
     };
     tick();
@@ -524,7 +560,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [state.user, state.gate, arm, disarm, punish]);
+  }, [state.user, state.gate, syncOnce]);
 
   // ------------------------------------------------------------------
   // Background keep-alive: start the idle watchdog so the app auto-activates
@@ -785,6 +821,71 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     await refreshPermissionStatus();
   }, [refreshPermissionStatus]);
 
+  /**
+   * Manual full-app refresh — the top-bar button.
+   * One forceful reconnect pass over the whole app instead of waiting for
+   * the (possibly backed-off) poll: re-syncs sessions + profile from
+   * BT LEARNING, re-reads the device's real permission state, re-arms the
+   * background watchdog, and reconciles the native seal so the router can
+   * leave the counting screen when the phone is no longer locked.
+   * Resolves true when BT LEARNING answered.
+   */
+  const refreshApp = useCallback(async (): Promise<boolean> => {
+    if (refreshBusy.current) return false;
+    refreshBusy.current = true;
+    dispatch({ type: 'SET_REFRESHING', refreshing: true });
+    try {
+      const s0 = stateRef.current;
+      // 1. Reconnect to BT LEARNING (sessions + user + arm/disarm logic).
+      let ok = false;
+      if (s0.user && s0.gate === 'app') {
+        ok = await syncOnce();
+      } else if (s0.user) {
+        // Signed in but outside the app gate (e.g. permissions screen):
+        // still re-pull the profile so the refresh reconnects the link.
+        try {
+          const me = await fetchMe();
+          dispatch({ type: 'SET_USER', user: me.user });
+          dispatch({ type: 'SET_VIOLATIONS', violations: me.violations });
+          ok = true;
+        } catch {
+          ok = false;
+        }
+      }
+      // 2. Re-read the real permission + enforcement state of the device.
+      await refreshPermissionStatus();
+      dispatch({ type: 'SET_ENFORCEMENT', available: LockdownNative.available });
+      // 3. Reconcile with the native watchdog. If the phone is no longer
+      //    sealed natively AND the session's programmed end has passed, the
+      //    seal is genuinely over (e.g. the watchdog unlocked while JS was
+      //    suspended) — drop the stale lockdown state so the router exits
+      //    the counting screen instead of sitting on an expired countdown
+      //    until the student force-stops the app. This can never unlock a
+      //    live session early: it only fires at/after the end time.
+      const s1 = stateRef.current;
+      if (s1.lockdown.active && LockdownNative.available) {
+        const endMs = s1.lockdown.serverEndsAt
+          ? Date.parse(s1.lockdown.serverEndsAt)
+          : Number.POSITIVE_INFINITY;
+        const enforcing = await LockdownNative.isEnforcing().catch(() => true);
+        if (!enforcing && serverNow().getTime() >= endMs) {
+          await disarm('completed');
+        }
+      }
+      // 4. Re-arm the background watchdog / corner chip / queued uploads.
+      const s2 = stateRef.current;
+      if (s2.user && LockdownNative.available) {
+        LockdownNative.startBackgroundGuard().catch(() => undefined);
+      }
+      DriveCorner.now(s2.sessions, s2.lockdown);
+      drainOutbox().catch(() => undefined);
+      return ok;
+    } finally {
+      refreshBusy.current = false;
+      dispatch({ type: 'SET_REFRESHING', refreshing: false });
+    }
+  }, [syncOnce, refreshPermissionStatus, disarm]);
+
   const startManualFocus = useCallback(
     async (minutes: number, title = 'Manual Deep Work') => {
       const start = serverNow();
@@ -842,6 +943,34 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [punish]
   );
 
+  const importDeviceApps = useCallback(async (): Promise<number> => {
+    const s = stateRef.current;
+    // Tier 1 #3: the shield is frozen while a session is sealed — the scan
+    // result lands on the next visit, never mid-session.
+    if (s.lockdown.active) return 0;
+    const installed = await LockdownNative.getInstalledApps().catch(() => []);
+    if (!installed.length) return 0;
+    const known = new Set(s.shield.map((a) => a.packageId));
+    const fresh = installed
+      .filter((a) => a.packageId && !known.has(a.packageId))
+      .map((a) => ({
+        id: `dev_${a.packageId}`,
+        name: a.name || a.packageId,
+        packageId: a.packageId,
+        category: guessAppCategory(a.packageId, a.name || ''),
+        // Default-deny reality: unlisted apps are ALREADY intercepted.
+        // Entry shows blocked so the student sees the true protection and
+        // can deliberately un-seal the ones they need for study.
+        blocked: true,
+        iconHint: (a.name.replace(/[^A-Za-z]/g, '').slice(0, 2) || 'AP').toUpperCase(),
+      }));
+    if (!fresh.length) return 0;
+    const next = [...s.shield, ...fresh];
+    dispatch({ type: 'SET_SHIELD', shield: next });
+    void LockdownNative.updateShield(next).catch(() => undefined);
+    return fresh.length;
+  }, []);
+
   const recordAttemptRef = useRef<((app: string) => void) | null>(null);
   recordAttemptRef.current = recordAttempt;
 
@@ -870,8 +999,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       startManualFocus,
       emergencyUnlock,
       toggleApp,
+      importDeviceApps,
       recordAttempt,
       setGate,
+      refreshApp,
     }),
     [
       state,
@@ -885,8 +1016,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       startManualFocus,
       emergencyUnlock,
       toggleApp,
+      importDeviceApps,
       recordAttempt,
       setGate,
+      refreshApp,
     ]
   );
 

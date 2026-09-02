@@ -83,6 +83,27 @@ it('registers the services and receivers inside <application>', async () => {
   );
 });
 
+it('adds the MAIN/LAUNCHER <queries> block for on-device app discovery', async () => {
+  const doc = await runManifestMod(makeManifestDoc());
+
+  const queries = doc.manifest['queries'] ?? [];
+  const launcherIntents = queries.flatMap((q) => q.intent ?? []);
+  const found = launcherIntents.some(
+    (i) =>
+      (i.action ?? []).some((a) => a.$['android:name'] === 'android.intent.action.MAIN') &&
+      (i.category ?? []).some((c) => c.$['android:name'] === 'android.intent.category.LAUNCHER')
+  );
+  expect(found).toBe(true);
+
+  // <queries> must precede <application> in the emitted XML.
+  const keys = Object.keys(doc.manifest);
+  expect(keys.indexOf('queries')).toBeLessThan(keys.indexOf('application'));
+
+  // Idempotent: a second mod run must not duplicate the block.
+  const twice = await runManifestMod(doc);
+  expect((twice.manifest['queries'] ?? []).length).toBe(queries.length);
+});
+
 it('stays idempotent when the mod runs twice (prebuild + bare rebuild)', async () => {
   const once = await runManifestMod(makeManifestDoc());
   const twice = await runManifestMod(once);
