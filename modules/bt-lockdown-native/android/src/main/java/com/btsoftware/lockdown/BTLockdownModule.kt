@@ -69,6 +69,13 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
    * While admin is active the app cannot be silently uninstalled and the
    * admin cannot be switched off without firing LockdownAdminReceiver,
    * which reports tamper natively.
+   *
+   * Some OEMs (notably MIUI/HyperOS) silently swallow
+   * ACTION_ADD_DEVICE_ADMIN — the button then "does nothing" and the user
+   * has to dig through system settings manually. We therefore try, in
+   * order: the direct activation prompt -> the Device admin apps list ->
+   * the Security settings screen, so the button always lands somewhere
+   * the student can flip the switch.
    */
   @ReactMethod
   fun requestDeviceAdmin(promise: Promise) {
@@ -77,6 +84,10 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
         promise.resolve(true)
         return
       }
+    } catch (_: Throwable) { }
+    var opened = false
+    // 1. The direct "Activate device admin" prompt.
+    try {
       val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
         putExtra(
           DevicePolicyManager.EXTRA_DEVICE_ADMIN,
@@ -85,11 +96,36 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
         putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "BT LOCKDOWN uses this only to prevent the seal being removed mid-session. It never locks or wipes your device.")
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       }
-      ctx.startActivity(intent)
-    } catch (_: Throwable) {
-      // Some OEMs hide the admin screen; enforcement works without it.
+      if (ctx.packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY) != null) {
+        ctx.startActivity(intent)
+        opened = true
+      }
+    } catch (_: Throwable) { }
+    // 2. The system "Device admin apps" list (launchable even when the
+    //    direct prompt is suppressed).
+    if (!opened) {
+      try {
+        val intent = Intent().apply {
+          component = ComponentName("com.android.settings", "com.android.settings.DeviceAdminSettings")
+          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (ctx.packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY) != null) {
+          ctx.startActivity(intent)
+          opened = true
+        }
+      } catch (_: Throwable) { }
     }
-    promise.resolve(isAdminActive())
+    // 3. Last resort: Security settings — Device admin lives underneath it.
+    if (!opened) {
+      try {
+        val intent = Intent(Settings.ACTION_SECURITY_SETTINGS).apply {
+          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        ctx.startActivity(intent)
+        opened = true
+      } catch (_: Throwable) { }
+    }
+    promise.resolve(isAdminActive() || opened)
   }
 
   @ReactMethod
@@ -310,6 +346,48 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     promise.resolve(active && isAccessibilityEnabled())
   }
 
+  /**
+   * Every launchable app on the phone, for the Shield tab's "detect apps on
+   * this phone" scan. Uses a plain MAIN/LAUNCHER query (declared under
+   * <queries> in the manifest) — no restricted QUERY_ALL_PACKAGES needed.
+   * Returns [{packageId, name}] sorted by name; BT LOCKDOWN itself is
+   * excluded (it is always whitelisted anyway).
+   */
+  @ReactMethod
+  fun getInstalledApps(promise: Promise) {
+    val out = Arguments.createArray()
+    try {
+      val pm = ctx.packageManager
+      val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+      val resolved =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+          pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0))
+        } else {
+          @Suppress("DEPRECATION")
+          pm.queryIntentActivities(intent, 0)
+        }
+      val seen = HashSet<String>()
+      val apps = ArrayList<Pair<String, String>>()
+      for (ri in resolved) {
+        val pkg = ri.activityInfo?.packageName ?: continue
+        if (pkg == ctx.packageName) continue
+        if (!seen.add(pkg)) continue
+        val label = try {
+          ri.loadLabel(pm)?.toString()?.takeIf { it.isNotBlank() } ?: pkg
+        } catch (_: Throwable) { pkg }
+        apps.add(Pair(label, pkg))
+      }
+      apps.sortBy { it.first.lowercase() }
+      for ((label, pkg) in apps) {
+        val m = Arguments.createMap()
+        m.putString("packageId", pkg)
+        m.putString("name", label)
+        out.pushMap(m)
+      }
+    } catch (_: Throwable) { }
+    promise.resolve(out)
+  }
+
   private fun batteryIgnored(): Boolean {
     return try {
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) true
@@ -359,11 +437,50 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     }
   }
 
+  /**
+   * "Is our seal service actually ON" — made robust against MIUI/HyperOS
+   * false readings. Symptoms fixed here: the app claimed accessibility was
+   * OFF while the toggle was visibly ON. Causes:
+   *  1. The AccessibilityManager list can be stale right after the toggle —
+   *     the authoritative source is Settings.Secure's
+   *     ENABLED_ACCESSIBILITY_SERVICES string, which Android actually
+   *     consults when binding services.
+   *  2. One exact flattened name is compared, but OEMs flatten differently
+   *     (long "pkg/pkg.Class" vs short "pkg/.Class").
+   * We check both sources and match by package + class suffix.
+   */
   private fun isAccessibilityEnabled(): Boolean {
-    val am = ctx.getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
-    val list = am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-    val me = ComponentName(ctx, LockdownAccessibilityService::class.java).flattenToString()
-    return list.any { it.resolveInfo.serviceInfo.let { s -> ComponentName(s.packageName, s.name).flattenToString() } == me }
+    val pkg = ctx.packageName
+    val cls = "LockdownAccessibilityService"
+    // 1. AccessibilityManager (runtime view).
+    try {
+      val am = ctx.getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
+      val list = am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+      val hit = list.any { info ->
+        val si = info.resolveInfo.serviceInfo
+        si.packageName == pkg && si.name.substringAfterLast('.') == cls
+      }
+      if (hit) return true
+    } catch (_: Throwable) { }
+    // 2. Settings.Secure (authoritative binding view).
+    return try {
+      val enabled = Settings.Secure.getString(
+        ctx.contentResolver,
+        Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+      )
+      if (enabled.isNullOrEmpty()) {
+        false
+      } else {
+        val cn = ComponentName(ctx, LockdownAccessibilityService::class.java)
+        val long = cn.flattenToString()        // pkg/pkg.LockdownAccessibilityService
+        val short = cn.flattenToShortString()  // pkg/.LockdownAccessibilityService
+        enabled.split(':').any {
+          it.equals(long, ignoreCase = true) || it.equals(short, ignoreCase = true)
+        }
+      }
+    } catch (_: Throwable) {
+      false
+    }
   }
 
   companion object {

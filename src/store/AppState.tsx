@@ -10,7 +10,7 @@ import React, {
 } from 'react';
 import { AppState as RNAppState, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
-import { SHIELD_APPS } from '@/src/data/seed';
+import { SHIELD_APPS, guessAppCategory } from '@/src/data/seed';
 import { getApiBase, hydrateConfig, setToken } from '@/src/config';
 import {
   completeSession,
@@ -209,6 +209,15 @@ type Ctx = State & {
   startManualFocus: (minutes: number, title?: string) => Promise<void>;
   emergencyUnlock: () => Promise<void>;
   toggleApp: (id: string) => void;
+  /**
+   * Shield tab "detect apps on this phone": scans the device for launchable
+   * apps and merges anything new into the shield list. Newly detected apps
+   * arrive as blocked=true — this is the honest picture, because native
+   * enforcement is default-deny (only whitelisted apps get through). The
+   * student's real power is UNCHECKING apps they want to keep open during
+   * Deep Work. Resolves the number of newly discovered apps.
+   */
+  importDeviceApps: () => Promise<number>;
   recordAttempt: (appLabel: string) => void;
   setGate: (gate: RouteGate) => void;
   /**
@@ -934,6 +943,34 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [punish]
   );
 
+  const importDeviceApps = useCallback(async (): Promise<number> => {
+    const s = stateRef.current;
+    // Tier 1 #3: the shield is frozen while a session is sealed — the scan
+    // result lands on the next visit, never mid-session.
+    if (s.lockdown.active) return 0;
+    const installed = await LockdownNative.getInstalledApps().catch(() => []);
+    if (!installed.length) return 0;
+    const known = new Set(s.shield.map((a) => a.packageId));
+    const fresh = installed
+      .filter((a) => a.packageId && !known.has(a.packageId))
+      .map((a) => ({
+        id: `dev_${a.packageId}`,
+        name: a.name || a.packageId,
+        packageId: a.packageId,
+        category: guessAppCategory(a.packageId, a.name || ''),
+        // Default-deny reality: unlisted apps are ALREADY intercepted.
+        // Entry shows blocked so the student sees the true protection and
+        // can deliberately un-seal the ones they need for study.
+        blocked: true,
+        iconHint: (a.name.replace(/[^A-Za-z]/g, '').slice(0, 2) || 'AP').toUpperCase(),
+      }));
+    if (!fresh.length) return 0;
+    const next = [...s.shield, ...fresh];
+    dispatch({ type: 'SET_SHIELD', shield: next });
+    void LockdownNative.updateShield(next).catch(() => undefined);
+    return fresh.length;
+  }, []);
+
   const recordAttemptRef = useRef<((app: string) => void) | null>(null);
   recordAttemptRef.current = recordAttempt;
 
@@ -962,6 +999,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       startManualFocus,
       emergencyUnlock,
       toggleApp,
+      importDeviceApps,
       recordAttempt,
       setGate,
       refreshApp,
@@ -978,6 +1016,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       startManualFocus,
       emergencyUnlock,
       toggleApp,
+      importDeviceApps,
       recordAttempt,
       setGate,
       refreshApp,

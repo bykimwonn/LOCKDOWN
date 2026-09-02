@@ -1,4 +1,36 @@
-import type { ShieldApp, WhitelistApp } from '@/src/types';
+import type { AppCategory, ShieldApp, WhitelistApp } from '@/src/types';
+
+/**
+ * Buckets for apps detected on the device (Shield tab scan). First match
+ * wins, so social stays ahead of entertainment (TikTok is video AND social).
+ * Anything unmatched lands in 'other' and can be re-tagged later.
+ */
+const CATEGORY_HINTS: Array<[RegExp, AppCategory]> = [
+  [
+    /instagram|tiktok|musically|whatsapp|facebook|katana|twitter|snapchat|discord|telegram|reddit|messenger|threads|pinterest|linkedin|imo\b|wechat|viber|signal/i,
+    'social',
+  ],
+  [
+    /pubg|freefire|garena|supercell|king\.|roblox|minecraft|activision|epicgames|eagames|zynga|miniclip|game/i,
+    'games',
+  ],
+  [
+    /youtube|netflix|spotify|disney|primevideo|showmax|dstv|music|video|twitch|vimeo/i,
+    'entertainment',
+  ],
+  [
+    /chrome|firefox|opera|brave|browser|duckduckgo|emmx|edge|internet/i,
+    'browsers',
+  ],
+];
+
+export function guessAppCategory(packageId: string, name: string): AppCategory {
+  const hay = `${packageId} ${name}`;
+  for (const [re, cat] of CATEGORY_HINTS) {
+    if (re.test(hay)) return cat;
+  }
+  return 'other';
+}
 
 export const WHITELIST: WhitelistApp[] = [
   { id: 'w1', name: 'Phone', reason: 'Emergency calls stay open', essential: true },

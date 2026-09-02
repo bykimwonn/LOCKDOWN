@@ -262,7 +262,7 @@ class LockdownOverlayService : Service() {
     root.addView(countText)
 
     val note = TextView(this).apply {
-      text = "This phone is sealed until the session ends.\nTap below to return to BT LOCKDOWN."
+      text = "Protected against distractions by BT LOCKDOWN.\nThis phone is sealed until the session ends.\nTap below to return to BT LOCKDOWN."
       setTextColor(Color.parseColor("#8A8A93"))
       textSize = 14f
       gravity = Gravity.CENTER
@@ -659,19 +659,11 @@ class LockdownOverlayService : Service() {
       }
     }
 
-    // 4. Accessibility permission watchdog (throttled ~60s between reports)
+    // 4. Accessibility permission watchdog (throttled ~60s between reports).
+    //    Uses the robust MIUI-safe check — a stale reading here previously
+    //    could hard-seal the phone while accessibility was actually ON.
     if (SystemClock.elapsedRealtime() - lastA11yWarnAt > 60_000) {
-      val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
-      val list = am.getEnabledAccessibilityServiceList(
-        android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK
-      )
-      val me = android.content.ComponentName(this, LockdownAccessibilityService::class.java).flattenToString()
-      val on = list.any {
-        it.resolveInfo.serviceInfo.let { s ->
-          android.content.ComponentName(s.packageName, s.name).flattenToString()
-        } == me
-      }
-      if (!on) {
+      if (!isAccessibilityOn()) {
         lastA11yWarnAt = SystemClock.elapsedRealtime()
         // Durable: recorded even if JS was force-quit.
         NativeReporter.report(
@@ -779,17 +771,42 @@ class LockdownOverlayService : Service() {
   // Misc
   // ------------------------------------------------------------------
 
+  /**
+   * Robust "is our seal service actually ON" check. MIUI/HyperOS can leave
+   * the AccessibilityManager list stale right after the toggle — the app
+   * then claims accessibility is off while it is visibly ON. Cross-check
+   * the authoritative Settings.Secure ENABLED_ACCESSIBILITY_SERVICES string
+   * and match by package + class suffix (short vs long flattening differs
+   * across OEMs). Mirrors BTLockdownModule.isAccessibilityEnabled().
+   */
   private fun isAccessibilityOn(): Boolean {
-    return try {
+    val pkg = packageName
+    val cls = "LockdownAccessibilityService"
+    try {
       val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
       val list = am.getEnabledAccessibilityServiceList(
         android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK
       )
-      val me = android.content.ComponentName(this, LockdownAccessibilityService::class.java).flattenToString()
-      list.any {
-        it.resolveInfo.serviceInfo.let { s ->
-          android.content.ComponentName(s.packageName, s.name).flattenToString()
-        } == me
+      val hit = list.any { info ->
+        val si = info.resolveInfo.serviceInfo
+        si.packageName == pkg && si.name.substringAfterLast('.') == cls
+      }
+      if (hit) return true
+    } catch (_: Throwable) { }
+    return try {
+      val enabled = android.provider.Settings.Secure.getString(
+        contentResolver,
+        android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+      )
+      if (enabled.isNullOrEmpty()) {
+        false
+      } else {
+        val cn = android.content.ComponentName(this, LockdownAccessibilityService::class.java)
+        val long = cn.flattenToString()
+        val short = cn.flattenToShortString()
+        enabled.split(':').any {
+          it.equals(long, ignoreCase = true) || it.equals(short, ignoreCase = true)
+        }
       }
     } catch (_: Throwable) {
       false

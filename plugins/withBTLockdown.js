@@ -136,6 +136,49 @@ function withBTLockdown(config) {
     ensurePerm('android.permission.FOREGROUND_SERVICE_SPECIAL_USE');
     doc['uses-permission'] = perms;
 
+    // App discovery (Shield tab "detect apps on this phone"). Android 11+
+    // package visibility hides other apps unless asked for properly: a
+    // <queries> MAIN/LAUNCHER intent lets queryIntentActivities() see every
+    // launchable app WITHOUT the Play-restricted QUERY_ALL_PACKAGES
+    // permission. <queries> must sit before <application> in the XML, so the
+    // manifest object is rebuilt with that key order when needed.
+    {
+      const queries = Array.isArray(doc['queries']) ? doc['queries'] : [];
+      const hasLauncherQuery = queries.some((q) =>
+        (q.intent ?? []).some(
+          (i) =>
+            (i.action ?? []).some((a) => a.$['android:name'] === 'android.intent.action.MAIN') &&
+            (i.category ?? []).some((c) => c.$['android:name'] === 'android.intent.category.LAUNCHER')
+        )
+      );
+      if (!hasLauncherQuery) {
+        queries.push({
+          intent: [
+            {
+              action: [{ $: { 'android:name': 'android.intent.action.MAIN' } }],
+              category: [{ $: { 'android:name': 'android.intent.category.LAUNCHER' } }],
+            },
+          ],
+        });
+      }
+      if (!Array.isArray(doc['queries'])) {
+        const rebuilt = {};
+        let placed = false;
+        for (const key of Object.keys(doc)) {
+          if (!placed && key === 'application') {
+            rebuilt['queries'] = queries;
+            placed = true;
+          }
+          rebuilt[key] = doc[key];
+        }
+        if (!placed) rebuilt['queries'] = queries;
+        for (const key of Object.keys(doc)) delete doc[key];
+        Object.assign(doc, rebuilt);
+      } else {
+        doc['queries'] = queries;
+      }
+    }
+
     // Guard: the parsed document is `{ manifest: { … } }`, so `manifest` must stay the
     // ONLY top-level key. Any sibling (e.g. a `uses-permission` written on modResults)
     // makes the XML writer emit `<root><manifest>…</manifest><uses-permission/></root>`,
