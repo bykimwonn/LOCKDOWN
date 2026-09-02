@@ -45,7 +45,7 @@ const PAGES = [
   {
     kicker: '08  ·  Support',
     title: 'Built by people\nyou can call.',
-    body: 'BT LOCKDOWN is owned and maintained by Bongani Tatenda of BT Software Solutions. Stuck with login, a wrong lock, or a phone quirk? Call or WhatsApp +263 78 329 1237, or email bonganitatenda196@gmail.com — help is personal here.',
+    body: 'BT LOCKDOWN is owned and maintained by Bongani Tshuma of BT Software Solutions. Stuck with login, a wrong lock, or a phone quirk? Call or WhatsApp +263 78 329 1237, or email bonganitatenda196@gmail.com — help is personal here.',
   },
 ];
 

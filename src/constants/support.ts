@@ -4,7 +4,7 @@
  * update here when the support line changes.
  */
 export const SUPPORT = {
-  ownerName: 'Bongani Tatenda',
+  ownerName: 'Bongani Tshuma',
   org: 'BT Software Solutions',
   product: 'BT LOCKDOWN',
   version: '1.0.0',
