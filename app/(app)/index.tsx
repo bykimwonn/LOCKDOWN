@@ -1,3 +1,4 @@
+import { AttentionBanner } from '@/src/components/AttentionBanner';
 import { RefreshButton } from '@/src/components/RefreshButton';
 import { StatusRing } from '@/src/components/StatusRing';
 import { Button, Card, Label, Mono, Pill } from '@/src/components/ui';
@@ -53,6 +54,10 @@ export default function Command() {
           </View>
         </View>
       </View>
+
+      {/* After first-run setup a dead grant is a strip here + a system notification,
+          never a screen the app drags you to. Policy: src/services/attention.ts. */}
+      <AttentionBanner />
 
       <View style={styles.ringWrap}>
         <StatusRing

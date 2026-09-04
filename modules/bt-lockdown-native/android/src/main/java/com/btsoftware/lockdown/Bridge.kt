@@ -14,8 +14,17 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
  *  - serverInactive                     server says the session is over
  *  - unauthorized                       token rejected (expired / unbound)
  *  - accessibilityOff                   user disabled the accessibility service
+ *  - a11yRestored                       the seal service got bound again
+ *  - sealOff     (why=…, sealed=…)      the seal is down and an alert notification was
+ *                                       raised (idle or mid-session); JS refreshes the
+ *                                       banner from it instead of polling for it
  *  - overlayDenied                      SYSTEM_ALERT_WINDOW permission missing
  *  - heartbeatLost                      N consecutive failed heartbeats
+ *  - netProtectActive                   network shield verified enforcing
+ *  - netProtectDegraded                 tunnel up but routing says it is not
+ *  - netProtectDown                     establish() keeps failing (technical)
+ *  - netRevoked    (reason=…)            the VPN was disconnected on the device
+ *  - netShieldOff                        shield turned off mid-session (JS alias)
  */
 object Bridge {
 

@@ -386,7 +386,36 @@ modules/bt-lockdown-native/
   android/src/main/java/com/btsoftware/lockdown/
     LockdownAccessibilityService.kt → intercepts blocked app launches
     LockdownOverlayService.kt       → foreground watchdog, polls /current every 5s, heartbeats 20s
+    LockdownVpnService.kt           → blackhole VPN tunnel: no Internet for blocked apps
+    NetworkProtectionManager.kt     → shield modes, consent, verified health, Device Owner policy
+    AccessibilityHealth.kt          → sub-second seal-loss detection + kill causes
+    WatchdogAlarmReceiver.kt        → 15-min keep-alive tick (Doze-safe, no exact-alarm permission)
+
+src/services/protection.ts          → renders the VERIFIED protection state (never optimistic)
 ```
+
+---
+
+## 9B) Network shield + Device Owner enrolment (optional, school-managed phones)
+
+The accessibility seal can be switched off on the phone (or killed by MIUI). The
+network shield is the second layer that keeps social media offline when that
+happens. Design, safety valves and the test checklist: **`NETWORK_SHIELD.md`**.
+
+```bash
+# Arm it for the student's own device: Settings tab → Network shield → "Shield apps"
+# (Android then asks once: "BT LOCKDOWN will start a VPN" — that dialog is required).
+
+# School-managed exam devices (fresh device, no accounts on it yet):
+adb shell dpm set-device-owner com.btsoftware.lockdown/.LockdownAdminReceiver
+# → the app can then hand the tunnel to Android (always-on + lockdown), which
+#   survives reboot and keeps blocking even if the app is force-stopped, and from
+#   Android 11 the student cannot switch that always-on VPN off.
+```
+
+Nothing here changes the TEACHING contract: no new routes, and shield violations
+still arrive as `event_type: "tamper_detected"`.
+
 
 ---
 

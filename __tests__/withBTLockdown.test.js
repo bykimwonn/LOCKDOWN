@@ -83,6 +83,55 @@ it('registers the services and receivers inside <application>', async () => {
   );
 });
 
+it('wires the blackhole VpnService the way Android requires it', async () => {
+  const doc = await runManifestMod(makeManifestDoc());
+  const app = AndroidConfig.Manifest.getMainApplicationOrThrow(doc);
+  const vpn = (app.service ?? []).find((e) =>
+    e.$['android:name'].endsWith('LockdownVpnService')
+  );
+  expect(vpn).toBeDefined();
+
+  // Without BIND_VPN_SERVICE the system refuses to bind us, and with the wrong
+  // action filter the always-on policy cannot find the service at all: either
+  // mistake makes establish() return null and the network shield silently dies.
+  expect(vpn.$['android:permission']).toBe('android.permission.BIND_VPN_SERVICE');
+  // exported="false" would be the "obviously safer" edit that breaks the feature:
+  // system_server binds this service cross-process AND VpnService.prepare() /
+  // Settings->VPN resolve it by an IMPLICIT android.net.VpnService intent, and
+  // implicit resolution skips non-exported components. The permission attribute is
+  // the actual access control (same shape as LockdownAccessibilityService above).
+  expect(vpn.$['android:exported']).toBe('true');
+  const actions = (vpn['intent-filter'] ?? []).flatMap((f) => f.action ?? []).map((a) => a.$['android:name']);
+  expect(actions).toContain('android.net.VpnService');
+  // SUPPORTS_ALWAYS_ON absent means true; an explicit false would make
+  // DevicePolicyManager#setAlwaysOnVpnPackage throw UnsupportedOperationException,
+  // which is the "survives a force-stop" half of the design.
+  const meta = (vpn['meta-data'] ?? []).find((m) => m.$['android:name'] === 'android.net.VpnService.SUPPORTS_ALWAYS_ON');
+  expect(meta ? meta.$['android:value'] : 'true').toBe('true');
+
+  // Idempotent, and never a second VpnService (that would opt the whole app out of
+  // always-on if any one of them declared SUPPORTS_ALWAYS_ON=false).
+  const twice = await runManifestMod(doc);
+  const app2 = AndroidConfig.Manifest.getMainApplicationOrThrow(twice);
+  expect(app2.service.filter((e) => e.$['android:name'].endsWith('LockdownVpnService'))).toHaveLength(1);
+});
+
+it('wires the Doze keep-alive receiver and stopWithTask on the watchdog', async () => {
+  const doc = await runManifestMod(makeManifestDoc());
+  const app = AndroidConfig.Manifest.getMainApplicationOrThrow(doc);
+
+  const tick = (app.receiver ?? []).find((r) => r.$['android:name'].endsWith('WatchdogAlarmReceiver'));
+  expect(tick).toBeDefined();
+  // AlarmManager targets this app only, so the receiver must not be exported.
+  expect(tick.$['android:exported']).toBe('false');
+  const actions = (tick['intent-filter'] ?? []).flatMap((f) => f.action ?? []).map((a) => a.$['android:name']);
+  expect(actions).toContain('com.btsoftware.lockdown.WATCHDOG_TICK');
+
+  const overlay = (app.service ?? []).find((e) => e.$['android:name'].endsWith('LockdownOverlayService'));
+  expect(overlay.$['android:stopWithTask']).toBe('false');
+  expect(overlay.$['android:foregroundServiceType']).toBe('specialUse');
+});
+
 it('adds the MAIN/LAUNCHER <queries> block for on-device app discovery', async () => {
   const doc = await runManifestMod(makeManifestDoc());
 

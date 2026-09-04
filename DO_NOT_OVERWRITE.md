@@ -265,3 +265,59 @@ heartbeat + login; a binding idle **14+ days** gets `401 device_expired`
 blocked app: 1st = warning, 2nd = -10, 3rd+ = -25 + streak ·
 force quit / emergency unlock: -25 + streak ·
 permission revoked / clock tamper: -50 + streak.
+
+---
+
+## 10. Network shield + seal health (do not overwrite)
+
+Added 2026-09-04. Full design in `NETWORK_SHIELD.md`. If another chat "simplifies"
+the native module, these are the pieces that must stay, and the rules they exist
+for.
+
+**Files that must stay** (`modules/bt-lockdown-native/android/src/main/java/com/btsoftware/lockdown/`):
+
+| File | Job — deleting it silently removes a protection layer |
+| --- | --- |
+| `LockdownVpnService.kt` | blackhole `VpnService` tunnel (kernel-enforced Internet block) |
+| `NetworkProtectionManager.kt` | modes + consent + verify/repair/report + all Device Owner calls |
+| `AccessibilityHealth.kt` | sub-second seal-loss detection, kill-cause classification, DO accessibility allowlist |
+| `WatchdogAlarmReceiver.kt` | 15-min idle-allowed keep-alive tick |
+| `plugins/withBTLockdown.js` | must keep declaring the VpnService with `android:permission="android.permission.BIND_VPN_SERVICE"` + the `android.net.VpnService` action, or `establish()` returns null forever |
+| `src/services/protection.ts` | the only place the verified state becomes words; unit-tested |
+
+**Rules:**
+
+1. Never report a stronger state than the device verified. `STATE_ACTIVE` (and the
+   `Full Protection` label) requires tunnel up **and** a `TRANSPORT_VPN` network in
+   `ConnectivityManager` **and** our own network excluded **and** a server
+   round-trip inside 150 s. Do not "fix" a red notification by relaxing this.
+2. Do not add accessibility auto-rebind, `WRITE_SECURE_SETTINGS` writes, or any
+   loop that fights the system VPN/Accessibility UI. It is impossible from an app
+   and it is what Play's Accessibility API and platform-security policies exist to
+   stop. The supported equivalents are: sub-second detection → hard seal → network
+   block, and Device Owner `setAlwaysOnVpnPackage(..., lockdown = true, ...)`.
+3. Every release path (`expired`, `serverInactive`, `unauthorized`, `deactivate`,
+   sign-out, the 8 h ceiling) must keep calling `NetworkProtectionManager.release()`
+   — that call is what stops the app from stranding a phone without Internet.
+4. BT LOCKDOWN's own package must stay excluded from the tunnel
+   (`addDisallowedApplication`, or the lockdown allowlist on API 29+), otherwise the
+   4 s `/sync`, the heartbeat and the violation outbox die with the student's apps
+   and the teacher can no longer release the session remotely.
+6. **The permissions screen is a first-run screen.** After `setupDone` is persisted,
+   nothing may `dispatch({ type: 'SET_GATE', gate: 'permissions' })` (or
+   `router.replace('/permissions')`) because a grant is missing. On MIUI the seal
+   drops many times a day; a route hijack from the 4 s sync / 12 s health loop is
+   what made the app feel stuck and un-usable, and it fights the router. A missing
+   grant after setup is: the red banner on Home (`src/components/AttentionBanner.tsx`,
+   policy in `src/services/attention.ts`) + a throttled system notification
+   (`LockdownOverlayService.syncSealAlert`). The screen itself stays reachable from
+   Settings → "Full re-arm". `__tests__/attentionGuards.test.js` fails if this
+   regresses, and `arm()` must keep refusing to fake a session it cannot enforce.
+7. `getDeviceGuard()` is cached for 2 s in `lockdownNative.ts` on purpose (four
+   pollers used to ask for it at once). Anything that *just changed* a permission
+   must call `invalidateDeviceGuard()` or `getDeviceGuard(true)`.
+
+5. `network_shield_off` is a client-side violation type that maps to the existing
+   server `event_type: "tamper_detected"`. Do not invent new `/api/lockdown/*`
+   routes or new `event_type` values — the server rejects unknown types and the
+   event is dropped.

@@ -1,6 +1,7 @@
 import { DeviceEventEmitter, NativeModules, Platform } from 'react-native';
 import { getApiBase, getToken } from '@/src/config';
 import type { PermissionStatus, ShieldApp } from '@/src/types';
+import type { ProtectionStatus, ShieldMode } from '@/src/services/protection';
 
 type NativeLockdown = {
   requestScreenTimeAuthorization: () => Promise<boolean>;
@@ -11,6 +12,15 @@ type NativeLockdown = {
   openAutostartSettings: () => Promise<boolean>;
   isSamsungDevice: () => Promise<boolean>;
   startBackgroundGuard: () => Promise<boolean>;
+  getProtectionStatus: () => Promise<ProtectionStatus>;
+  setNetworkShield: (mode: string, consent: boolean, lockVpnUi: boolean) => Promise<ProtectionStatus & { state: string }>;
+  requestNetworkShieldConsent: () => Promise<boolean>;
+  grantNetworkBreak: (minutes: number) => Promise<boolean>;
+  releaseNetworkShield: () => Promise<boolean>;
+  setAccessibilityAllowlist: (enabled: boolean) => Promise<boolean>;
+  openSealSettings: () => Promise<boolean>;
+  /** Take down the "seal service is off" system notification (banner "Later"). */
+  dismissSealAlert: () => Promise<boolean>;
   showCornerTimer: (targetAt: number) => Promise<boolean>;
   hideCornerTimer: () => Promise<boolean>;
   enterKiosk: () => Promise<boolean>;
@@ -52,6 +62,10 @@ export type DeviceGuard = {
   owner: 'granted' | 'denied' | 'unavailable';
   /** True when the device is currently pinned in lock-task / kiosk mode. */
   kiosk: 'granted' | 'denied' | 'unavailable';
+  /** Network shield mode: 'off' | 'apps' | 'strict'. Informational only. */
+  network: ShieldMode | 'unavailable';
+  /** What the health controller verified across BOTH layers. */
+  protection: 'FULL' | 'SEAL_ONLY' | 'NETWORK_ONLY' | 'DEGRADED' | 'IDLE' | 'unknown';
   miui: 'detected' | 'none';
   notifications: string;
 };
@@ -63,13 +77,32 @@ export type NativeLockdownEvent = {
     | 'serverInactive'
     | 'unauthorized'
     | 'accessibilityOff'
+    | 'a11yRestored'
+    /** Idle-time seal loss: no session is sealed, but the service is off. */
+    | 'sealOff'
     | 'adminDisabled'
     | 'overlayDenied'
-    | 'heartbeatLost';
+    | 'heartbeatLost'
+    | 'netProtectActive'
+    | 'netProtectDegraded'
+    | 'netProtectDown'
+    | 'netRevoked'
+    | 'netShieldOff';
   app?: string;
+  reason?: string;
 };
 
 const LINKED: Partial<NativeLockdown> | undefined = NativeModules.BTLockdownModule;
+
+let guardCache: DeviceGuard | null = null;
+let guardCacheAt = 0;
+const GUARD_TTL_MS = 2000;
+
+/** Drop the cached guard so the next read hits the device (called after any grant). */
+export function invalidateDeviceGuard() {
+  guardCache = null;
+  guardCacheAt = 0;
+}
 
 const fallbackPerms = (): PermissionStatus => ({
   screenTime: Platform.OS === 'ios' ? 'unavailable' : 'unavailable',
@@ -86,6 +119,8 @@ function defaultGuard(): DeviceGuard {
     admin: 'unavailable',
     owner: 'unavailable',
     kiosk: 'unavailable',
+    network: 'unavailable',
+    protection: 'unknown',
     miui: 'none',
     notifications: 'pending',
   };
@@ -177,6 +212,66 @@ export const LockdownNative = {
     return false;
   },
 
+  // ----------------------------------------------------------------
+  // Network shield (third layer) + seal health
+  // ----------------------------------------------------------------
+
+  /** Verified state of both enforcement layers. */
+  async getProtectionStatus(): Promise<ProtectionStatus | null> {
+    if (Platform.OS !== 'android' || !LINKED?.getProtectionStatus) return null;
+    return LINKED.getProtectionStatus().catch(() => null);
+  },
+
+  /**
+   * Arm the network shield.
+   * @param consent true only after the on-screen explanation was accepted; on a
+   *   school device-owner device the institution's policy is the authority.
+   * @param lockVpnUi device-owner only: also hide Settings → VPN while sealed, so
+   *   the shield cannot be disconnected there. Opt-in, cleared at session end.
+   */
+  async setNetworkShield(mode: ShieldMode, consent: boolean, lockVpnUi = false) {
+    if (LINKED?.setNetworkShield) {
+      return LINKED.setNetworkShield(mode, consent, lockVpnUi).catch(() => null);
+    }
+    return null;
+  },
+
+  /** Launch the system VPN allowance dialog if it has not been answered. */
+  async requestNetworkShieldConsent() {
+    if (LINKED?.requestNetworkShieldConsent) return LINKED.requestNetworkShieldConsent().catch(() => false);
+    return false;
+  },
+
+  /** Bounded internet-only break during a sealed session (seal stays up). */
+  async grantNetworkBreak(minutes: number) {
+    if (LINKED?.grantNetworkBreak) return LINKED.grantNetworkBreak(minutes).catch(() => false);
+    return false;
+  },
+
+  /** Switch the shield off. Refused natively while a session is sealed. */
+  async releaseNetworkShield() {
+    if (LINKED?.releaseNetworkShield) return LINKED.releaseNetworkShield().catch(() => false);
+    return false;
+  },
+
+  /** Device-owner only: permit no other accessibility service but ours. */
+  async setAccessibilityAllowlist(enabled: boolean) {
+    if (LINKED?.setAccessibilityAllowlist) return LINKED.setAccessibilityAllowlist(enabled).catch(() => false);
+    return false;
+  },
+
+  /** Open Settings → Accessibility so a parent/teacher can restore the seal. */
+  async openSealSettings() {
+    if (LINKED?.openSealSettings) return LINKED.openSealSettings().catch(() => false);
+    return false;
+  },
+
+  /** Clear the seal alert notification without changing anything else. */
+  async dismissSealAlert() {
+    if (LINKED?.dismissSealAlert) return LINKED.dismissSealAlert().catch(() => false);
+    return false;
+  },
+
   /** Pin the whole device in kiosk mode (device-owner only). */
   async enterKiosk() {
     if (LINKED?.enterKiosk) return LINKED.enterKiosk();
@@ -194,9 +289,29 @@ export const LockdownNative = {
     return false;
   },
 
-  async getDeviceGuard(): Promise<DeviceGuard> {
-    if (Platform.OS === 'android' && LINKED?.getDeviceGuard) return LINKED.getDeviceGuard();
-    return defaultGuard();
+  /**
+   * `getDeviceGuard()` reads Settings.Secure, AccessibilityManager and NotificationManager
+   * on the main thread. Four separate pollers (the 4 s sync loop, the setup screen,
+   * the status pill, the protection refresh) used to ask for it at the same moment,
+   * which is exactly the kind of main-thread traffic that makes this app feel like it
+   * "sticks" for a frame when a session arms. A short TTL cache collapses those into
+   * one call; `force` bypasses it right after a grant dialog, when the answer really
+   * has changed.
+   */
+  async getDeviceGuard(force = false): Promise<DeviceGuard> {
+    if (Platform.OS !== 'android' || !LINKED?.getDeviceGuard) return defaultGuard();
+    const now = Date.now();
+    if (!force && guardCache && now - guardCacheAt < GUARD_TTL_MS) return guardCache;
+    try {
+      const g = await LINKED.getDeviceGuard();
+      guardCache = g;
+      guardCacheAt = now;
+      return g;
+    } catch {
+      // Keep answering from the last known value rather than flipping the UI to
+      // "unavailable" because one read threw.
+      return guardCache ?? defaultGuard();
+    }
   },
 
   async getPermissionStatus(): Promise<PermissionStatus> {

@@ -84,12 +84,37 @@ try {
   for (const name of [
     'com.btsoftware.lockdown.LockdownAccessibilityService',
     'com.btsoftware.lockdown.LockdownOverlayService',
+    'com.btsoftware.lockdown.LockdownVpnService',
   ]) {
     if (!declared('service').includes(name)) fail(`<service ${name}> missing from <application>`);
+  }
+  // A VpnService without this exact binding permission + action is silently
+  // unusable: establish() returns null and the network shield can never arm.
+  const vpn = (app.service ?? []).find((e) => e.$?.['android:name'] === 'com.btsoftware.lockdown.LockdownVpnService');
+  if (vpn) {
+    if (vpn.$['android:permission'] !== 'android.permission.BIND_VPN_SERVICE') {
+      fail('LockdownVpnService must carry android:permission="android.permission.BIND_VPN_SERVICE".');
+    }
+    // The system binds this service cross-process and resolves it implicitly; an
+    // exported="false" VpnService is invisible to both, which silently disables the
+    // whole network shield. android:permission is the guard, not exported="false".
+    if (vpn.$['android:exported'] !== 'true') {
+      fail(
+        'LockdownVpnService must declare android:exported="true" (system_server binds it and\n' +
+        '  Settings->VPN resolves it implicitly). BIND_VPN_SERVICE is what restricts the binding.'
+      );
+    }
+    const actions = (vpn['intent-filter'] ?? [])
+      .flatMap((f) => f.action ?? [])
+      .map((a) => a.$?.['android:name']);
+    if (!actions.includes('android.net.VpnService')) {
+      fail('LockdownVpnService is missing the android.net.VpnService intent-filter action.');
+    }
   }
   for (const name of [
     'com.btsoftware.lockdown.BootReceiver',
     'com.btsoftware.lockdown.LockdownAdminReceiver',
+    'com.btsoftware.lockdown.WatchdogAlarmReceiver',
   ]) {
     if (!declared('receiver').includes(name)) fail(`<receiver ${name}> missing from <application>`);
   }

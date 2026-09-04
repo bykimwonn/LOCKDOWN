@@ -2,6 +2,7 @@ import { RefreshButton } from '@/src/components/RefreshButton';
 import { StatusRing } from '@/src/components/StatusRing';
 import { Body, Button, Label, Pill } from '@/src/components/ui';
 import { useApp } from '@/src/store/AppState';
+import { summarizeProtection } from '@/src/services/protection';
 import { formatRemain, serverNow } from '@/src/services/serverTime';
 import { colors, fonts } from '@/src/theme';
 import { WHITELIST } from '@/src/data/seed';
@@ -12,7 +13,10 @@ import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function LockdownScreen() {
-  const { lockdown, sessions, emergencyUnlock, enforcementAvailable, gate } = useApp();
+  const {
+    lockdown, sessions, emergencyUnlock, enforcementAvailable, gate,
+    protection, refreshProtection, openSealSettings,
+  } = useApp();
   const router = useRouter();
   const inset = useSafeAreaInsets();
   const [, tick] = useState(0);
@@ -24,6 +28,15 @@ export default function LockdownScreen() {
     const id = setInterval(() => tick((n) => n + 1), 250);
     return () => clearInterval(id);
   }, []);
+
+  // The sealed screen is where a dead enforcement layer is most visible, so it
+  // shows the verified state (native health controller) rather than "session is
+  // running", and refreshes it while mounted.
+  useEffect(() => {
+    void refreshProtection();
+    const id = setInterval(() => void refreshProtection(), 8000);
+    return () => clearInterval(id);
+  }, [refreshProtection]);
 
   // Exit the counting screen the moment the device is unlocked (end time,
   // teacher release, emergency unlock, or a refresh that confirmed the seal
@@ -63,10 +76,16 @@ export default function LockdownScreen() {
     setHoldMs(0);
   };
 
+  const summary = summarizeProtection(protection);
+  const sealLost = summary.level === 'NETWORK_ONLY' || summary.level === 'DEGRADED';
+  const netOn = protection?.state === 'ACTIVE';
+
   return (
     <View style={[styles.root, { paddingTop: inset.top + 10, paddingBottom: inset.bottom + 16 }]}>
       <View style={styles.top}>
-        <Pill color={colors.mint}>SEALED</Pill>
+        <Pill color={sealLost ? colors.crimson : netOn ? colors.mint : colors.amber}>
+          {netOn ? 'SEALED + NET BLOCKED' : sealLost ? 'SEAL SERVICE OFF' : 'SEALED'}
+        </Pill>
         <View style={styles.topRight}>
           <Label>SERVER TIME</Label>
           {/* Manual re-sync — picks up an early teacher release the moment
@@ -90,6 +109,21 @@ export default function LockdownScreen() {
       <Body dim style={{ textAlign: 'center', paddingHorizontal: 20 }}>
         Social, games and unapproved tabs are shielded. Essential tools stay open.
       </Body>
+      {enforcementAvailable && protection ? (
+        <Text
+          style={{
+            ...styles.statusLine,
+            color: sealLost ? colors.crimson : netOn ? colors.mint : colors.amber,
+          }}
+        >
+          {summary.headline} — {protection.statusLine}
+        </Text>
+      ) : null}
+      {sealLost ? (
+        <Pressable onPress={() => void openSealSettings()} style={styles.fixRow}>
+          <Text style={styles.fixT}>Seal service is off — tap to re-enable it ›</Text>
+        </Pressable>
+      ) : null}
       <View style={styles.chips}>
         {WHITELIST.slice(0, 4).map((w) => (
           <View key={w.id} style={styles.chip}>
@@ -135,6 +169,24 @@ export default function LockdownScreen() {
 }
 
 const styles = StyleSheet.create({
+  statusLine: {
+    fontFamily: fonts.sansMed,
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 8,
+    paddingHorizontal: 20,
+    letterSpacing: 0.2,
+  },
+  fixRow: {
+    marginTop: 10,
+    alignSelf: 'center',
+    borderWidth: 1,
+    borderColor: colors.crimson,
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+  },
+  fixT: { fontFamily: fonts.sansSemi, fontSize: 12, color: colors.crimson },
   root: { flex: 1, backgroundColor: '#040405', paddingHorizontal: 20 },
   top: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   topRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },

@@ -110,6 +110,10 @@ class LockdownAccessibilityService : AccessibilityService() {
   )
 
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+    // Heartbeat for AccessibilityHealth (throttled inside it): proof that the
+    // callback path is live. This is what tells an OEM process kill apart from a
+    // student toggle, and why "listed in Settings" is never trusted alone.
+    AccessibilityHealth.tick(this)
     if (event == null) return
     if (
       event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
@@ -174,42 +178,70 @@ class LockdownAccessibilityService : AccessibilityService() {
 
   override fun onInterrupt() = Unit
 
+  /**
+   * Revival hook (the "restart protection" the OS actually allows).
+   *
+   * An app cannot bind, rebind or force-enable an accessibility service — the
+   * lifecycle belongs to system_server and to the user, and trying to work
+   * around that is exactly what platform policy forbids. What IS supported is
+   * reacting to the system's own bind, which is how the service comes back after
+   * a process kill, a reboot, or the student re-enabling it:
+   *
+   *  - mark the seal alive for AccessibilityHealth (kills the "degraded" state),
+   *  - relaunch the watchdog foreground service (before this, a process that was
+   *    killed and then rebound by the system had a live interceptor but a dead
+   *    enforcement loop until someone opened the app),
+   *  - re-assert the network shield so both layers are in step again.
+   */
   override fun onServiceConnected() {
     super.onServiceConnected()
-    // Permission restored mid-session: nothing to do, the watchdog
-    // stops warning on its own.
+    connected = true
+    AccessibilityHealth.onBound(this)
+    // Whatever killed the process, the enforcement loop comes back with it.
+    try {
+      LockdownOverlayService.startIdle(this)
+      if (getSharedPreferences("bt.lockdown", Context.MODE_PRIVATE).getBoolean("active", false)) {
+        LockdownOverlayService.enforceNow(this)
+      }
+    } catch (_: Throwable) { }
+    // The barrier is deliberately NOT hidden here: if it went up because the seal
+    // was lost, it stays until the interceptor itself sees a safe app — which the
+    // next window event does.
   }
 
   /**
-   * The moment the student disables the accessibility (seal) service, Android
-   * calls onUnbind()/onDestroy(). If a session is active, immediately report
-   * the tamper AND lock the whole phone. This is faster than the 60s watchdog
-   * poll — there is no window where turning the service off gives a free pass.
+   * The moment the student disables the accessibility (seal) service Android
+   * calls onUnbind()/onDestroy(). If a session is armed: report the tamper, raise
+   * the hard seal, and engage the network shield — all synchronously, so there
+   * is no window where switching the service off is a free pass. The social apps
+   * lose their Internet at the same instant the interceptor goes away.
    */
   override fun onUnbind(intent: Intent?): Boolean {
-    try {
-      val active = getSharedPreferences("bt.lockdown", Context.MODE_PRIVATE)
-        .getBoolean("active", false)
-      if (active) {
-        NativeReporter.report(
-          this, "accessibilityOff", "tamper_detected",
-          "The accessibility (seal) service was switched off during a sealed session."
-        )
-        LockdownOverlayService.show(this)
-      }
-    } catch (_: Throwable) { }
+    connected = false
+    AccessibilityHealth.onUnbound(this)
+    sealOnLoss()
     return super.onUnbind(intent)
   }
 
   override fun onDestroy() {
+    connected = false
+    AccessibilityHealth.onUnbound(this)
+    sealOnLoss()
+    super.onDestroy()
+  }
+
+  private fun sealOnLoss() {
     try {
       val active = getSharedPreferences("bt.lockdown", Context.MODE_PRIVATE)
         .getBoolean("active", false)
-      if (active) {
-        LockdownOverlayService.show(this)
-      }
+      if (!active) return
+      NativeReporter.report(
+        this, "accessibilityOff", "tamper_detected",
+        "The accessibility (seal) service was switched off during a sealed session."
+      )
+      LockdownOverlayService.show(this)
+      LockdownOverlayService.enforceNow(this)
     } catch (_: Throwable) { }
-    super.onDestroy()
   }
 
   private fun browserTabAllowed(event: AccessibilityEvent): Boolean {
@@ -219,5 +251,14 @@ class LockdownAccessibilityService : AccessibilityService() {
 
   companion object {
     private var lastBlockAt = 0L
+
+    /**
+     * In-process proof that this service object is alive. Lives in the same
+     * process as the watchdog, so a plain volatile flag is enough — and it is the
+     * only signal that catches the MIUI case where the *setting* still lists the
+     * service while the process hosting it is long gone.
+     */
+    @Volatile
+    var connected = false
   }
 }

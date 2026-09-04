@@ -1,36 +1,59 @@
 import { Ambient, Body, Button, Card, Display, Label, Pill } from '@/src/components/ui';
-import { LockdownNative, type DeviceGuard } from '@/src/services/lockdownNative';
+import { invalidateDeviceGuard, LockdownNative, type DeviceGuard } from '@/src/services/lockdownNative';
 import { useApp } from '@/src/store/AppState';
 import { colors, fonts } from '@/src/theme';
 import { Bell, Shield, Smartphone, Zap } from 'lucide-react-native';
-import { useEffect, useState } from 'react';
-import { Platform, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { AppState, Platform, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function Permissions() {
-  const { finishPermissions, refreshPermissionStatus, requestBatteryExemption, enforcementAvailable } = useApp();
+  const {
+    finishPermissions,
+    refreshPermissionStatus,
+    requestBatteryExemption,
+    enforcementAvailable,
+    setupDone,
+  } = useApp();
   const inset = useSafeAreaInsets();
   const ios = Platform.OS === 'ios';
   const [guard, setGuard] = useState<DeviceGuard | null>(null);
   const [busy, setBusy] = useState(false);
   const [samsung, setSamsung] = useState(false);
 
+  // Reading the guard state means 3 system queries (Settings.Secure, AccessibilityManager,
+  // NotificationManager). This screen used to poll them every 2.5 s forever, which is
+  // exactly the sort of main-thread traffic that makes a screen like this feel sticky —
+  // and it was pointless once everything was already granted. Now: read on mount, read
+  // again when the app comes back to the foreground (that is the moment the student
+  // returns from system Settings), and poll fast only while a grant request is running.
+  const readGuard = useCallback(async () => {
+    const g = await LockdownNative.getDeviceGuard(true).catch(() => null);
+    if (g) setGuard(g);
+    void refreshPermissionStatus();
+  }, [refreshPermissionStatus]);
+
   useEffect(() => {
     if (ios) return;
-    let alive = true;
-    const read = async () => {
-      const g = await LockdownNative.getDeviceGuard().catch(() => null);
-      if (alive && g) setGuard(g);
-      const s = await LockdownNative.isSamsungDevice().catch(() => false);
-      if (alive && s) setSamsung(true);
-    };
-    read();
-    const id = setInterval(read, 2500);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, [ios]);
+    readGuard().catch(() => undefined);
+    LockdownNative.isSamsungDevice()
+      .then((v) => v && setSamsung(true))
+      .catch(() => undefined);
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') readGuard().catch(() => undefined);
+    });
+    return () => sub.remove();
+  }, [ios, readGuard]);
+
+  useEffect(() => {
+    if (ios || !busy) return;
+    const id = setInterval(() => {
+      LockdownNative.getDeviceGuard(true)
+        .then(setGuard)
+        .catch(() => undefined);
+    }, 1200);
+    return () => clearInterval(id);
+  }, [ios, busy]);
 
   const go = async () => {
     setBusy(true);
@@ -48,7 +71,7 @@ export default function Permissions() {
   return (
     <View style={[styles.root, { paddingTop: inset.top + 18, paddingBottom: inset.bottom + 18 }]}>
       <Ambient />
-      <Label tone="amber">ENFORCEMENT LAYER</Label>
+      <Label tone="amber">{setupDone ? 'ENFORCEMENT LAYER · RE-ARM' : 'ENFORCEMENT LAYER · ONE-TIME SETUP'}</Label>
       <Display style={{ marginTop: 16 }}>
         {ios ? 'iOS is not\nsupported yet.' : 'Arm the\noperating system.'}
       </Display>
@@ -75,14 +98,14 @@ export default function Permissions() {
               title="Accessibility service"
               body="Watches app switches. Blocked apps are intercepted instantly. Tap to open settings, then switch BT LOCKDOWN ON."
               ok={a11yOk}
-              onPress={() => LockdownNative.requestAccessibility().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+              onPress={() => LockdownNative.requestAccessibility().then(() => { invalidateDeviceGuard(); return void refreshPermissionStatus(); }).catch(() => undefined)}
             />
             <Row
               icon={<Smartphone color={colors.mint} size={20} />}
               title="Display over other apps"
               body="Full-screen sealed barrier when a distractor is opened. Tap to allow."
               ok={overlayOk}
-              onPress={() => LockdownNative.requestOverlay().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+              onPress={() => LockdownNative.requestOverlay().then(() => { invalidateDeviceGuard(); return void refreshPermissionStatus(); }).catch(() => undefined)}
             />
           </Card>
 
@@ -105,7 +128,7 @@ export default function Permissions() {
               title="Device admin (phone admin)"
               body="Prevents the seal being removed or the app uninstalled mid-session. Optional — tap to grant if you want tamper protection."
               ok={guard?.admin === 'granted'}
-              onPress={() => LockdownNative.requestDeviceAdmin().then(() => void refreshPermissionStatus()).catch(() => undefined)}
+              onPress={() => LockdownNative.requestDeviceAdmin().then(() => { invalidateDeviceGuard(); return void refreshPermissionStatus(); }).catch(() => undefined)}
             />
             {guard?.miui === 'detected' || samsung ? (
               <Row

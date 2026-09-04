@@ -59,6 +59,10 @@ function withBTLockdown(config) {
           //  - specialUse has no time limit and is not on the boot-restricted
           //    list, so BootReceiver keeps working on Android 15/16.
           'android:foregroundServiceType': 'specialUse',
+          // Swiping BT LOCKDOWN out of recents must not take the seal with it:
+          // this is the supported declaration (onTaskRemoved below stays as the
+          // OEM-kills-anyway fallback).
+          'android:stopWithTask': 'false',
         },
         // Play Console / OS review label for the specialUse type. This app is
         // a student device lock: session enforcement + server synchronization
@@ -71,6 +75,56 @@ function withBTLockdown(config) {
                 'Student device lockdown: seals the device during teacher-assigned Deep Work sessions and keeps the session watchdog + BT LEARNING sync running while the app is backgrounded.',
             },
           },
+        ],
+      });
+    }
+
+    // Tier 1 (network layer): the blackhole VPN that takes the Internet away
+    // from blocked apps while a session is sealed. Declared exactly the way
+    // Android requires for a VpnService: bound by BIND_VPN_SERVICE (the *system*
+    // holds that permission; there is no matching <uses-permission> for us) and
+    // matching the android.net.VpnService action. SUPPORTS_ALWAYS_ON stays true so
+    // a device-owner school deployment can hand the tunnel to the OS with
+    // DevicePolicyManager.setAlwaysOnVpnPackage() — the only supported way for the
+    // block to survive a force-stop of our own process.
+    //
+    // exported="true" is NOT a mistake and must not be "tightened" to false (the
+    // accessibility service above uses the same shape): the tunnel is bound
+    // *cross-process* by system_server, and the system VPN page plus
+    // VpnService.prepare() resolve the service by an IMPLICIT
+    // android.net.VpnService intent. Non-exported components are filtered out of
+    // implicit resolution, so with exported="false" our app would not appear in
+    // Settings -> VPN at all and establish() would never be reached — the shield
+    // would look armed and block nothing. The android:permission attribute is what
+    // makes this safe: only a caller holding BIND_VPN_SERVICE (i.e. the platform)
+    // may bind or start it, exactly like the accessibility service.
+    if (!has('com.btsoftware.lockdown.LockdownVpnService')) {
+      app.service.push({
+        $: {
+          'android:name': 'com.btsoftware.lockdown.LockdownVpnService',
+          'android:exported': 'true',
+          'android:permission': 'android.permission.BIND_VPN_SERVICE',
+        },
+        'intent-filter': [
+          { action: [{ $: { 'android:name': 'android.net.VpnService' } }] },
+        ],
+        'meta-data': [
+          { $: { 'android:name': 'android.net.VpnService.SUPPORTS_ALWAYS_ON', 'android:value': 'true' } },
+        ],
+      });
+    }
+
+    // Doze keep-alive: an inexact setAndAllowWhileIdle tick (needs no exact-alarm
+    // permission) so the watchdog comes back even when the restart of the
+    // foreground service is deferred.
+    if (!hasReceiver('com.btsoftware.lockdown.WatchdogAlarmReceiver')) {
+      app.receiver.push({
+        $: {
+          'android:name': 'com.btsoftware.lockdown.WatchdogAlarmReceiver',
+          'android:exported': 'false',
+        },
+        'intent-filter': [
+          { action: [{ $: { 'android:name': 'com.btsoftware.lockdown.WATCHDOG_TICK' } }] },
         ],
       });
     }
