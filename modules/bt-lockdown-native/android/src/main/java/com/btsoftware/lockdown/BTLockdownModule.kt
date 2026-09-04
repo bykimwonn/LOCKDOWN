@@ -458,6 +458,16 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
   @ReactMethod
   fun openSealSettings(promise: Promise) {
     AccessibilityHealth.openAccessibilitySettings(ctx)
+    // Opening the settings page is the fix in progress: take the alert down now so
+    // the shade is not left showing a warning the student is actively handling.
+    LockdownOverlayService.dismissSealAlert(ctx)
+    promise.resolve(true)
+  }
+
+  /** Dismiss the "seal service is off" notification (banner's "Later"). */
+  @ReactMethod
+  fun dismissSealAlert(promise: Promise) {
+    LockdownOverlayService.dismissSealAlert(ctx)
     promise.resolve(true)
   }
 

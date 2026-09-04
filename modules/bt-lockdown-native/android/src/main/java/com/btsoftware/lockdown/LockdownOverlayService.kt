@@ -529,6 +529,10 @@ class LockdownOverlayService : Service() {
   }
 
   private fun tickIdle() {
+    // The seal-health prompt is evaluated on the idle path too, BEFORE anything can
+    // return early: "accessibility quietly turned itself off" is exactly the case
+    // where there may be no token, no session and no JS running to notice it.
+    try { syncSealAlert("idle") } catch (_: Throwable) { }
     // Already enforcing — the active watchdog takes over.
     if (prefs.getBoolean("active", false)) {
       startWatchdog()
@@ -754,12 +758,18 @@ class LockdownOverlayService : Service() {
     main.post { if (overlay == null) showOverlay() }
     try { NetworkProtectionManager.ensure(this) } catch (_: Throwable) { }
     updateOngoingNotification()
+    // Also raise the dismissible alert: mid-session the ongoing notification says
+    // "seal service OFF", but the student may be inside another app and never see it.
+    try { syncSealAlert(why) } catch (_: Throwable) { }
   }
 
   /** The seal came back (system rebind or re-grant): stop alarming, keep sealing. */
   private fun a11yRestored() {
     Bridge.emit("a11yRestored")
     updateOngoingNotification()
+    // The prompt is about a problem that no longer exists: it goes away by itself,
+    // with nothing for the student to remember to clear.
+    try { syncSealAlert("restored") } catch (_: Throwable) { }
   }
 
   /** Called by JS on disarm (session completed / abandoned / sign-out). */
@@ -927,6 +937,18 @@ class LockdownOverlayService : Service() {
         NotificationChannel(CHANNEL, "BT LOCKDOWN", NotificationManager.IMPORTANCE_LOW)
       )
     }
+    // The separate ALERT channel exists because the ongoing one is IMPORTANCE_LOW
+    // on purpose (a permanent notification must never beep all day). A seal that
+    // died is a one-off event and deserves a heads-up, so it gets its own channel
+    // and its own id, and can be dismissed without touching the ongoing one.
+    if (mgr.getNotificationChannel(ALERT_CHANNEL) == null) {
+      val c = NotificationChannel(
+        ALERT_CHANNEL, "Seal problems", NotificationManager.IMPORTANCE_HIGH
+      )
+      c.description = "Tells you when the BT LOCKDOWN seal service has been switched off on this phone."
+      c.enableVibration(true)
+      mgr.createNotificationChannel(c)
+    }
   }
 
   private fun buildNotification(): Notification {
@@ -1036,6 +1058,105 @@ class LockdownOverlayService : Service() {
       .build()
   }
 
+  /**
+   * Keep the "seal service is off" alert in sync with reality — posted once per
+   * problem, cleared the moment the seal works again.
+   *
+   * Cadence rules that make this feel solid instead of naggy:
+   *  - it is silent until the seal has either been enabled once on this phone or a
+   *    session is actually running, so a student mid-setup is not chased by both
+   *    the setup screen and a notification;
+   *  - while the alert is on screen, a broken seal does NOT re-sound: the throttle
+   *    is ALERT_THROTTLE_MS, which is also how often a *persisting* problem is
+   *    re-raised so it cannot be ignored forever;
+   *  - restoring the seal cancels it (see a11yRestored) and the JS "Later" button
+   *    cancels it too (dismissSealAlert), which only re-arms on the next throttle.
+   */
+  private fun syncSealAlert(why: String) {
+    val p = prefs
+    val enforcing = AccessibilityHealth.isEnforcing(this)
+    val sealed = p.getBoolean("active", false)
+    val everEnabled = p.getLong("a11yBoundAt", 0L) > 0L
+    val up = p.getInt("sealAlertUp", 0) == 1
+    val now = System.currentTimeMillis()
+    if (enforcing) {
+      if (up) {
+        try {
+          getSystemService(NotificationManager::class.java)?.cancel(ALERT_ID)
+        } catch (_: Throwable) { }
+        p.edit().putInt("sealAlertUp", 0).remove("sealAlertWhy").apply()
+      }
+      return
+    }
+    if (!everEnabled && !sealed) return
+    if (up && now - p.getLong("sealAlertAt", 0L) < ALERT_THROTTLE_MS) return
+    // Tapping the alert opens the app (MainActivity is in the *app* module, so the
+    // launch intent is looked up rather than referenced by class — a class name in
+    // a library module would not compile and would break the build for the OEMs).
+    val flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+      (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) android.app.PendingIntent.FLAG_IMMUTABLE else 0)
+    val open = try {
+      packageManager.getLaunchIntentForPackage(packageName)?.let {
+        android.app.PendingIntent.getActivity(
+          this, 4404, it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), flags
+        )
+      }
+    } catch (_: Throwable) {
+      null
+    }
+    val n = Notification.Builder(this, ALERT_CHANNEL)
+      .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+      .setContentTitle(if (sealed) "BT LOCKDOWN — seal is OFF during your session" else "BT LOCKDOWN — seal service is off")
+      .setContentText(
+        if (sealed) {
+          "Blocked apps are not being intercepted any more. The phone stays locked and the " +
+            "internet shield is holding — tap to switch the seal back on."
+        } else {
+          "Your session and timetable still sync, but blocked apps are not intercepted. " +
+            "Tap to re-enable it (Settings \u2192 Accessibility \u2192 BT LOCKDOWN)."
+        }
+      )
+      .setStyle(Notification.BigTextStyle().bigText(
+        if (sealed) {
+          "Blocked apps are not being intercepted any more. The device stays sealed and the " +
+            "network shield is holding, so social apps will not load. Cause: " +
+            describeA11yLoss(p)
+        } else {
+          "Android or the battery manager switched off the BT LOCKDOWN seal service. Re-enable " +
+            "it in Settings \u2192 Accessibility \u2192 BT LOCKDOWN. Cause: " + describeA11yLoss(p)
+        }
+      ))
+      .setAutoCancel(true)
+      .setOnlyAlertOnce(up)
+    if (open != null) n.setContentIntent(open)
+    try {
+      getSystemService(NotificationManager::class.java)?.notify(ALERT_ID, n.build())
+      p.edit().putLong("sealAlertAt", now).putInt("sealAlertUp", 1).putString("sealAlertWhy", why).apply()
+      // Tell JS so an open app shows the banner in the same second, without the
+      // student having to pull-to-refresh.
+      Bridge.emit("sealOff", mapOf("why" to why, "sealed" to sealed))
+    } catch (_: Throwable) { }
+  }
+
+  /** Human-readable cause, straight from the seal layer's own record. */
+  private fun describeA11yLoss(p: android.content.SharedPreferences): String {
+    val why = p.getString("a11yLastDropWhy", "") ?: ""
+    val at = p.getLong("a11yLastDropAt", 0L)
+    val when0 = if (at > 0L) {
+      val mins = ((System.currentTimeMillis() - at) / 60_000L).coerceAtLeast(0L)
+      if (mins < 1L) "just now" else if (mins < 60L) "$mins min ago" else "${mins / 60} h ago"
+    } else {
+      "unknown time"
+    }
+    val label = when (why) {
+      AccessibilityHealth.WHY_USER_TOGGLE -> "switched off on this device"
+      AccessibilityHealth.WHY_PROCESS_KILLED -> "the phone killed BT LOCKDOWN in the background"
+      AccessibilityHealth.WHY_NEVER_ENABLED -> "never enabled on this device"
+      else -> "lost"
+    }
+    return "$label ($when0)"
+  }
+
   /** Refresh the persistent notification (sealed vs. standing by, and while armed). */
   private fun updateOngoingNotification() {
     try {
@@ -1048,6 +1169,27 @@ class LockdownOverlayService : Service() {
     const val PREFS = "bt.lockdown"
     private const val CHANNEL = "bt_lockdown"
     private const val NOTIF_ID = 4401
+    private const val ALERT_CHANNEL = "bt_lockdown_alert"
+    private const val ALERT_ID = 4403
+    /** Re-raise interval for a problem that is still there (30 min). */
+    private const val ALERT_THROTTLE_MS = 30 * 60 * 1000L
+
+    /**
+     * Clear the seal alert from JS (the banner's "Later" / "Fix now"). This only
+     * hides what the student has acknowledged; it does not re-arm anything, and the
+     * watchdog will raise it again after the throttle if the seal is still down.
+     */
+    fun dismissSealAlert(ctx: Context) {
+      try {
+        ctx.getSystemService(NotificationManager::class.java)?.cancel(ALERT_ID)
+      } catch (_: Throwable) { }
+      try {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+          .putInt("sealAlertUp", 0)
+          .putLong("sealAlertAt", System.currentTimeMillis())
+          .apply()
+      } catch (_: Throwable) { }
+    }
     private const val ACTION_STOP = "com.btsoftware.lockdown.STOP"
     const val ACTION_SHOW = "com.btsoftware.lockdown.SHOW"
     const val ACTION_HIDE = "com.btsoftware.lockdown.HIDE"

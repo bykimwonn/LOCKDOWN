@@ -272,3 +272,32 @@ because a ROM refusing our tunnel is not the student's fault.
   which apps *tried* to reach the network during a session (device owner, API 21+,
   logs must be polled with `retrieveNetworkLogs` and are capped/cleared by the
   OS). Deliberately not enabled here: it needs its own retention story.
+
+---
+
+## 12. How the app tells you something is off (added with the seal-health layer)
+
+Two rules, because the phone drops the seal on its own and the app used to react
+badly to that:
+
+| Situation | What the student sees |
+| --- | --- |
+| First run, grants missing | The one-time "Arm the operating system" screen (`/permissions`), in the only order Android accepts the grants |
+| Later, seal switched off / killed | Red **"Seal service is off"** strip at the top of Home + a heads-up **system notification** ("Re-enable now" / "Later") — never a screen the app drags you to |
+| During a sealed session | The barrier stays, the notification reads *seal service OFF*, and the strip on Home cannot be snoozed away |
+| Seal comes back | Banner and notification disappear by themselves |
+
+Mechanics worth knowing before editing:
+
+* Policy lives in `src/services/attention.ts` (`computeAttention`) — a pure function,
+  unit-tested in `__tests__/attention.test.ts`. Call sites are pinned by
+  `__tests__/attentionGuards.test.js`, including "no route hijack from `arm()`".
+* The notification is raised natively (`LockdownOverlayService.syncSealAlert`) so it
+  works with JS dead: own channel `bt_lockdown_alert` (the ongoing one stays
+  `IMPORTANCE_LOW`), re-raised at most every 30 min while the problem persists,
+  cancelled on restore and by the banner's "Later"/"Re-enable now".
+* It stays **silent until the seal has been enabled once** on the device
+  (`a11yBoundAt`) or a session is running, so a student mid-setup is not nagged by
+  both the setup screen and a notification.
+* `getDeviceGuard()` has a 2 s JS cache; a code path that just changed a permission
+  must bypass it (`getDeviceGuard(true)` / `invalidateDeviceGuard()`).

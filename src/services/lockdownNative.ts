@@ -19,6 +19,8 @@ type NativeLockdown = {
   releaseNetworkShield: () => Promise<boolean>;
   setAccessibilityAllowlist: (enabled: boolean) => Promise<boolean>;
   openSealSettings: () => Promise<boolean>;
+  /** Take down the "seal service is off" system notification (banner "Later"). */
+  dismissSealAlert: () => Promise<boolean>;
   showCornerTimer: (targetAt: number) => Promise<boolean>;
   hideCornerTimer: () => Promise<boolean>;
   enterKiosk: () => Promise<boolean>;
@@ -76,6 +78,8 @@ export type NativeLockdownEvent = {
     | 'unauthorized'
     | 'accessibilityOff'
     | 'a11yRestored'
+    /** Idle-time seal loss: no session is sealed, but the service is off. */
+    | 'sealOff'
     | 'adminDisabled'
     | 'overlayDenied'
     | 'heartbeatLost'
@@ -89,6 +93,16 @@ export type NativeLockdownEvent = {
 };
 
 const LINKED: Partial<NativeLockdown> | undefined = NativeModules.BTLockdownModule;
+
+let guardCache: DeviceGuard | null = null;
+let guardCacheAt = 0;
+const GUARD_TTL_MS = 2000;
+
+/** Drop the cached guard so the next read hits the device (called after any grant). */
+export function invalidateDeviceGuard() {
+  guardCache = null;
+  guardCacheAt = 0;
+}
 
 const fallbackPerms = (): PermissionStatus => ({
   screenTime: Platform.OS === 'ios' ? 'unavailable' : 'unavailable',
@@ -252,6 +266,12 @@ export const LockdownNative = {
     return false;
   },
 
+  /** Clear the seal alert notification without changing anything else. */
+  async dismissSealAlert() {
+    if (LINKED?.dismissSealAlert) return LINKED.dismissSealAlert().catch(() => false);
+    return false;
+  },
+
   /** Pin the whole device in kiosk mode (device-owner only). */
   async enterKiosk() {
     if (LINKED?.enterKiosk) return LINKED.enterKiosk();
@@ -269,9 +289,29 @@ export const LockdownNative = {
     return false;
   },
 
-  async getDeviceGuard(): Promise<DeviceGuard> {
-    if (Platform.OS === 'android' && LINKED?.getDeviceGuard) return LINKED.getDeviceGuard();
-    return defaultGuard();
+  /**
+   * `getDeviceGuard()` reads Settings.Secure, AccessibilityManager and NotificationManager
+   * on the main thread. Four separate pollers (the 4 s sync loop, the setup screen,
+   * the status pill, the protection refresh) used to ask for it at the same moment,
+   * which is exactly the kind of main-thread traffic that makes this app feel like it
+   * "sticks" for a frame when a session arms. A short TTL cache collapses those into
+   * one call; `force` bypasses it right after a grant dialog, when the answer really
+   * has changed.
+   */
+  async getDeviceGuard(force = false): Promise<DeviceGuard> {
+    if (Platform.OS !== 'android' || !LINKED?.getDeviceGuard) return defaultGuard();
+    const now = Date.now();
+    if (!force && guardCache && now - guardCacheAt < GUARD_TTL_MS) return guardCache;
+    try {
+      const g = await LINKED.getDeviceGuard();
+      guardCache = g;
+      guardCacheAt = now;
+      return g;
+    } catch {
+      // Keep answering from the last known value rather than flipping the UI to
+      // "unavailable" because one read threw.
+      return guardCache ?? defaultGuard();
+    }
   },
 
   async getPermissionStatus(): Promise<PermissionStatus> {

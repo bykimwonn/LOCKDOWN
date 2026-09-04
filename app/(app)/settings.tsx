@@ -4,6 +4,7 @@ import { LockdownNative, type DeviceGuard } from '@/src/services/lockdownNative'
 import { formatDuration, modeLabel, summarizeProtection, type ShieldMode } from '@/src/services/protection';
 import { useApp } from '@/src/store/AppState';
 import { colors, fonts } from '@/src/theme';
+import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Linking, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -16,6 +17,7 @@ export default function Settings() {
     setAccessibilityAllowlist, openSealSettings,
   } = useApp();
   const inset = useSafeAreaInsets();
+  const router = useRouter();
   const [guard, setGuard] = useState<DeviceGuard | null>(null);
   /** Mode chosen in the UI but not armed yet — arming needs the consent tap. */
   const [pendingMode, setPendingMode] = useState<ShieldMode | null>(null);
@@ -173,6 +175,12 @@ export default function Settings() {
             <Row k="Device" v="Xiaomi / Redmi — lock in recents" />
           </>
         ) : null}
+        <Hairline />
+        {/* Reachable on purpose, from here only. The app never drops the student on
+            this screen by itself any more — see src/services/attention.ts. It stays
+            in the app because on MIUI the grants sometimes have to be redone in the
+            exact order that screen walks through. */}
+        <Row k="Full re-arm (all grants, in order)" v="open" onPress={() => router.push('/permissions')} />
       </Card>
 
       <Label style={{ marginTop: 22, marginBottom: 10 }}>Network shield · protection</Label>
@@ -297,7 +305,7 @@ export default function Settings() {
           }}
         />
       ) : null}
-      {protection?.sealGuidance && !protection.seal?.enforcing && protection.sealed ? (
+      {protection?.sealGuidance && !protection.seal?.enforcing ? (
         <Card style={{ marginTop: 10 }}>
           <Text style={styles.warn}>Seal layer: {protection.sealGuidance}</Text>
           <Hairline />

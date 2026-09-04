@@ -303,6 +303,20 @@ for.
    (`addDisallowedApplication`, or the lockdown allowlist on API 29+), otherwise the
    4 s `/sync`, the heartbeat and the violation outbox die with the student's apps
    and the teacher can no longer release the session remotely.
+6. **The permissions screen is a first-run screen.** After `setupDone` is persisted,
+   nothing may `dispatch({ type: 'SET_GATE', gate: 'permissions' })` (or
+   `router.replace('/permissions')`) because a grant is missing. On MIUI the seal
+   drops many times a day; a route hijack from the 4 s sync / 12 s health loop is
+   what made the app feel stuck and un-usable, and it fights the router. A missing
+   grant after setup is: the red banner on Home (`src/components/AttentionBanner.tsx`,
+   policy in `src/services/attention.ts`) + a throttled system notification
+   (`LockdownOverlayService.syncSealAlert`). The screen itself stays reachable from
+   Settings → "Full re-arm". `__tests__/attentionGuards.test.js` fails if this
+   regresses, and `arm()` must keep refusing to fake a session it cannot enforce.
+7. `getDeviceGuard()` is cached for 2 s in `lockdownNative.ts` on purpose (four
+   pollers used to ask for it at once). Anything that *just changed* a permission
+   must call `invalidateDeviceGuard()` or `getDeviceGuard(true)`.
+
 5. `network_shield_off` is a client-side violation type that maps to the existing
    server `event_type: "tamper_detected"`. Do not invent new `/api/lockdown/*`
    routes or new `event_type` values — the server rejects unknown types and the
