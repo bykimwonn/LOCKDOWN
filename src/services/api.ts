@@ -14,6 +14,7 @@ function mapEventType(type: string): string {
     type === 'permission_revoked' ||
     type === 'accessibility_off' ||
     type === 'admin_disabled' ||
+    type === 'network_shield_off' ||
     type === 'time_tamper'
   ) {
     return 'tamper_detected';

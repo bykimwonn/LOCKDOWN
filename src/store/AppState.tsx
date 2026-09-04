@@ -32,6 +32,7 @@ import {
   LockdownNative,
   type NativeLockdownEvent,
 } from '@/src/services/lockdownNative';
+import type { ProtectionStatus, ShieldMode } from '@/src/services/protection';
 import { clockSkewMs, serverNow, serverNowIso } from '@/src/services/serverTime';
 import type {
   DeepWorkSession,
@@ -64,6 +65,11 @@ type State = {
   enforcementAvailable: boolean;
   /** True while the manual top-bar "refresh app" pass is running. */
   refreshing: boolean;
+  /**
+   * Live verdict of the native health controller: what the seal layer and the
+   * network shield are *actually* doing right now (verified, not "started").
+   */
+  protection: ProtectionStatus | null;
 };
 
 type Action =
@@ -86,7 +92,8 @@ type Action =
   | { type: 'HEARTBEAT'; at: string; missed?: boolean }
   | { type: 'SET_API'; apiBase: string }
   | { type: 'SET_ENFORCEMENT'; available: boolean }
-  | { type: 'SET_REFRESHING'; refreshing: boolean };
+  | { type: 'SET_REFRESHING'; refreshing: boolean }
+  | { type: 'SET_PROTECTION'; protection: ProtectionStatus | null };
 
 const defaultPerms = (): PermissionStatus => ({
   screenTime: 'unavailable',
@@ -109,6 +116,7 @@ const initial: State = {
   apiBase: '',
   enforcementAvailable: Platform.OS === 'android',
   refreshing: false,
+  protection: null,
 };
 
 function reducer(state: State, action: Action): State {
@@ -190,6 +198,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, apiBase: action.apiBase };
     case 'SET_ENFORCEMENT':
       return { ...state, enforcementAvailable: action.available };
+    case 'SET_PROTECTION':
+      return { ...state, protection: action.protection };
     case 'SET_REFRESHING':
       return { ...state, refreshing: action.refreshing };
     default:
@@ -205,6 +215,17 @@ type Ctx = State & {
   finishOnboarding: () => void;
   refreshPermissionStatus: () => Promise<void>;
   finishPermissions: () => Promise<void>;
+  /** Verified state of both enforcement layers (seal + network shield). */
+  protection: ProtectionStatus | null;
+  refreshProtection: () => Promise<void>;
+  setNetworkShield: (mode: ShieldMode, consent: boolean, lockVpnUi?: boolean) => Promise<unknown>;
+  requestNetworkShieldConsent: () => Promise<void>;
+  /** Bounded internet-only break during a sealed session. */
+  grantNetworkBreak: (minutes?: number) => Promise<boolean>;
+  releaseNetworkShield: () => Promise<boolean>;
+  /** Device-owner only: permit no other accessibility service but BT LOCKDOWN's. */
+  setAccessibilityAllowlist: (enabled: boolean) => Promise<boolean>;
+  openSealSettings: () => Promise<boolean>;
   requestBatteryExemption: () => Promise<void>;
   startManualFocus: (minutes: number, title?: string) => Promise<void>;
   emergencyUnlock: () => Promise<void>;
@@ -399,6 +420,67 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (updated) dispatch({ type: 'SET_USER', user: updated });
   }, []);
 
+  /**
+   * Pull the verified protection state from the native health controller. Cheap
+   * (a prefs read + two ConnectivityManager lookups), so it runs on the same
+   * 12 s loop as the seal check and after any native protection event.
+   */
+  const refreshProtection = useCallback(async () => {
+    if (Platform.OS !== 'android') return;
+    const p = await LockdownNative.getProtectionStatus();
+    dispatch({ type: 'SET_PROTECTION', protection: p });
+  }, []);
+
+  /**
+   * Arm / change the network shield. Consent is collected in the UI first (the
+   * shield takes the device's internet away during Deep Work, so it is never
+   * switched on silently); on a school device-owner device the institution's
+   * policy is already the authority.
+   */
+  const setNetworkShield = useCallback(
+    async (mode: ShieldMode, consent: boolean, lockVpnUi = false) => {
+      const res = await LockdownNative.setNetworkShield(mode, consent, lockVpnUi);
+      await refreshProtection();
+      return res;
+    },
+    [refreshProtection]
+  );
+
+  const requestNetworkShieldConsent = useCallback(async () => {
+    await LockdownNative.requestNetworkShieldConsent().catch(() => false);
+    await new Promise((r) => setTimeout(r, 1200));
+    await refreshProtection();
+  }, [refreshProtection]);
+
+  /** Bounded internet-only break; the seal itself stays up. */
+  const grantNetworkBreak = useCallback(
+    async (minutes = 5) => {
+      const ok = await LockdownNative.grantNetworkBreak(minutes);
+      await refreshProtection();
+      return ok;
+    },
+    [refreshProtection]
+  );
+
+  const releaseNetworkShield = useCallback(async () => {
+    const ok = await LockdownNative.releaseNetworkShield();
+    await refreshProtection();
+    return ok;
+  }, [refreshProtection]);
+
+  /** Device-owner only: permit no other accessibility service but ours. */
+  const setAccessibilityAllowlist = useCallback(
+    async (enabled: boolean) => {
+      const ok = await LockdownNative.setAccessibilityAllowlist(enabled);
+      await refreshProtection();
+      return ok;
+    },
+    [refreshProtection]
+  );
+
+  const openSealSettings = useCallback(() => LockdownNative.openSealSettings().catch(() => false), []);
+
+
   const arm = useCallback(
     async (session: DeepWorkSession, armedBy: 'sync' | 'manual') => {
       // Pre-flight: never arm a session the phone cannot actually enforce.
@@ -589,14 +671,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const check = async () => {
       const s = stateRef.current;
       const guard = await LockdownNative.getDeviceGuard().catch(() => null);
+      const protection = await LockdownNative.getProtectionStatus();
+      if (alive) dispatch({ type: 'SET_PROTECTION', protection });
       // If enforcement is expected (active session, or an imminent block) but
       // accessibility dropped, tell the store so the UI can guide re-granting.
       if (guard && s.user && (s.lockdown.active || s.sessions.some((x) => x.status === 'active'))) {
         if (guard.accessibility !== 'granted') {
           dispatch({ type: 'SET_ENFORCEMENT', available: LockdownNative.available });
           // Do not hard-bounce an active session here — the native watchdog
-          // hard-locks on accessibility-off already. This only makes the UI
-          // show the re-grant path; the arm pre-flight enforces at arm time.
+          // hard-locks on accessibility-off and the network shield takes over
+          // the blocking. This only keeps the re-grant path visible in the UI;
+          // the arm pre-flight enforces at arm time.
+          //
+          // Re-arm the background guard on every pass: this loop is the JS-side
+          // half of the keep-alive, so if the OEM killed the watchdog service the
+          // act of checking is also what brings it back (startBackgroundGuard is
+          // idempotent when it is already running).
+          void LockdownNative.startBackgroundGuard().catch(() => undefined);
         }
       }
       if (alive) timer = setTimeout(check, 12_000);
@@ -648,6 +739,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         case 'heartbeatLost':
           dispatch({ type: 'HEARTBEAT', at: serverNowIso(), missed: true });
           break;
+        // ---- protection layer events -------------------------------------
+        // A lost *shield* is a deliberate act on the same device in the same
+        // session as a lost seal, so it is scored the same way. A degraded or
+        // failed tunnel is our/ROM's technical problem, never the student's, so
+        // those only refresh the state (and the notification says so).
+        case 'netRevoked':
+        case 'netShieldOff':
+          if (s.lockdown.active) {
+            void punish(
+              'network_shield_off',
+              evt.reason
+                ? `The network shield was disconnected mid-session: ${evt.reason}`
+                : 'The network shield (VPN) was disabled on the device mid-session.'
+            );
+          }
+          void refreshProtection();
+          break;
+        case 'netProtectActive':
+        case 'netProtectDegraded':
+        case 'netProtectDown':
+        case 'a11yRestored':
+          void refreshProtection();
+          break;
         case 'overlayDenied':
           break;
         default:
@@ -656,7 +770,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     });
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [arm, disarm, punish]);
+  }, [arm, disarm, punish, refreshProtection]);
 
   // Force-quit detection: the React process leaving the foreground for a
   // long stretch during a sealed session.
@@ -995,6 +1109,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       finishOnboarding,
       refreshPermissionStatus,
       finishPermissions,
+      refreshProtection,
+      setNetworkShield,
+      requestNetworkShieldConsent,
+      grantNetworkBreak,
+      releaseNetworkShield,
+      setAccessibilityAllowlist,
+      openSealSettings,
       requestBatteryExemption,
       startManualFocus,
       emergencyUnlock,
@@ -1012,6 +1133,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       finishOnboarding,
       refreshPermissionStatus,
       finishPermissions,
+      refreshProtection,
+      setNetworkShield,
+      requestNetworkShieldConsent,
+      grantNetworkBreak,
+      releaseNetworkShield,
+      setAccessibilityAllowlist,
+      openSealSettings,
       requestBatteryExemption,
       startManualFocus,
       emergencyUnlock,

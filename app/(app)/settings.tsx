@@ -1,6 +1,7 @@
 import { Button, Card, Hairline, Label, Pill } from '@/src/components/ui';
 import { SUPPORT } from '@/src/constants/support';
 import { LockdownNative, type DeviceGuard } from '@/src/services/lockdownNative';
+import { formatDuration, modeLabel, summarizeProtection, type ShieldMode } from '@/src/services/protection';
 import { useApp } from '@/src/store/AppState';
 import { colors, fonts } from '@/src/theme';
 import { useEffect, useState } from 'react';
@@ -8,15 +9,24 @@ import { Linking, Platform, ScrollView, StyleSheet, Text, View } from 'react-nat
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function Settings() {
-  const { user, permissions, refreshPermissionStatus, syncOk, lastSyncAt, signOut, apiBase, enforcementAvailable, linkOk, refreshApp, refreshing } = useApp();
+  const {
+    user, permissions, refreshPermissionStatus, syncOk, lastSyncAt, signOut, apiBase,
+    enforcementAvailable, linkOk, refreshApp, refreshing, protection, refreshProtection,
+    setNetworkShield, requestNetworkShieldConsent, grantNetworkBreak, releaseNetworkShield,
+    setAccessibilityAllowlist, openSealSettings,
+  } = useApp();
   const inset = useSafeAreaInsets();
   const [guard, setGuard] = useState<DeviceGuard | null>(null);
+  /** Mode chosen in the UI but not armed yet — arming needs the consent tap. */
+  const [pendingMode, setPendingMode] = useState<ShieldMode | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
     const read = async () => {
       const g = await LockdownNative.getDeviceGuard().catch(() => null);
       if (alive && g) setGuard(g);
+      void refreshProtection();
     };
     read();
     const id = setInterval(read, 5000);
@@ -24,7 +34,21 @@ export default function Settings() {
       alive = false;
       clearInterval(id);
     };
-  }, []);
+  }, [refreshProtection]);
+
+  const summary = summarizeProtection(protection, guard);
+  const tone =
+    summary.tone === 'mint' ? colors.mint : summary.tone === 'crimson' ? colors.crimson : summary.tone === 'amber' ? colors.amber : colors.inkMute;
+
+  const arm = async (mode: ShieldMode, consent: boolean) => {
+    setBusy(true);
+    try {
+      await setNetworkShield(mode, consent, Boolean(protection?.lockVpnUi));
+      setPendingMode(null);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const dev = user?.device;
 
@@ -151,6 +175,165 @@ export default function Settings() {
         ) : null}
       </Card>
 
+      <Label style={{ marginTop: 22, marginBottom: 10 }}>Network shield · protection</Label>
+      <Card>
+        <View style={[styles.linkRow, { borderColor: tone }]}>
+          <View style={[styles.linkDot, { backgroundColor: tone }]} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.linkT}>{summary.headline.toUpperCase()}</Text>
+            <Text style={styles.linkS}>{summary.detail}</Text>
+          </View>
+        </View>
+        <Hairline />
+        <Row k="Layer 1 · app launches" v={sealLabel(protection)} onPress={() => void openSealSettings()} />
+        <Hairline />
+        <Row k="Layer 2 · internet" v={protection?.statusLine ?? 'unavailable'} />
+        <Hairline />
+        <Row k="Always-on tunnel" v={protection?.alwaysOnVpn ? 'Owned by Android (survives force-stop)' : 'Device owner only'} />
+        <Hairline />
+        <Row k="Captured apps" v={protection ? (protection.mode === 'strict' ? 'everything except BT LOCKDOWN' : `${protection.capturedApps} shielded`) : '—'} />
+        <Hairline />
+        <Row k="Blocked for" v={protection && protection.blockedForSeconds > 0 ? `${formatDuration(protection.blockedForSeconds)} / cap ${formatDuration(protection.ceilingSeconds)}` : '—'} />
+        <Hairline />
+        <Row k="Sync path" v={protection ? (protection.controlChannelOk ? 'BT LEARNING reachable' : 'no accepted heartbeat 150 s') : '—'} />
+        <Hairline />
+        <Row k="Seal drops / restores" v={protection?.seal ? `${protection.seal.dropCount} / ${protection.seal.restoreCount}` : '—'} />
+        <Hairline />
+        <Row k="Shield disconnects" v={protection ? String(protection.revokeCount) : '—'} />
+        {protection?.seal?.lastDropWhy ? (
+          <>
+            <Hairline />
+            <Row k="Last seal loss" v={protection.seal.lastDropWhy.replace(/_/g, ' ')} />
+          </>
+        ) : null}
+      </Card>
+
+      {summary.needsConsent || pendingMode ? (
+        <Card style={{ marginTop: 10 }}>
+          <Text style={styles.linkT}>What the network shield does</Text>
+          <Text style={styles.linkS}>
+            During a Deep Work session BT LOCKDOWN opens a local VPN that drops the
+            device&apos;s Internet for {pendingMode === 'strict' || protection?.mode === 'strict' ? 'every app except BT LOCKDOWN' : 'the apps on your shield list'}
+            , so social media stays unreachable even if the accessibility seal is
+            switched off or killed by the phone. Android shows its own VPN icon and
+            dialog for this — nothing is hidden. BT LOCKDOWN keeps its own
+            connection to BT LEARNING so your teacher can still end the session, and
+            the block is released automatically when the session ends, on a break, or
+            after the {protection ? Math.round(protection.ceilingSeconds / 3600) : 8}-hour safety ceiling.
+          </Text>
+          <Button
+            title="Accept and arm the shield"
+            variant="mint"
+            style={{ marginTop: 12 }}
+            disabled={busy}
+            onPress={() => void arm(pendingMode ?? protection?.mode ?? 'apps', true)}
+          />
+          <Button
+            title="Ask Android for the VPN allowance"
+            variant="ghost"
+            style={{ marginTop: 10 }}
+            onPress={() => void requestNetworkShieldConsent()}
+          />
+        </Card>
+      ) : null}
+
+      <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+        <Button
+          title="Off"
+          variant={protection?.mode === 'off' || !protection ? 'mint' : 'ghost'}
+          style={{ flex: 1 }}
+          disabled={busy}
+          onPress={() => void arm('off', false)}
+        />
+        <Button
+          title="Shield apps"
+          variant={protection?.mode === 'apps' ? 'mint' : 'ghost'}
+          style={{ flex: 1 }}
+          disabled={busy}
+          onPress={() => (protection?.consent ? void arm('apps', true) : setPendingMode('apps'))}
+        />
+        <Button
+          title="Strict"
+          variant={protection?.mode === 'strict' ? 'mint' : 'ghost'}
+          style={{ flex: 1 }}
+          disabled={busy}
+          onPress={() => (protection?.consent ? void arm('strict', true) : setPendingMode('strict'))}
+        />
+      </View>
+      <Text style={[styles.sub, { marginTop: 8 }]}>
+        {protection ? modeLabel(protection.mode) : 'No native layer in this build.'}
+        {protection?.sealed ? ' · armed while a session is sealed' : ''}
+      </Text>
+
+      {summary.action === 'break' && protection ? (
+        <Button
+          title={`Grant ${Math.min(5, protection.breakMinutesCap)}-min internet break (${protection.breaksCap - protection.breakCount} left)`}
+          variant="ghost"
+          style={{ marginTop: 12 }}
+          disabled={busy}
+          onPress={() => {
+            setBusy(true);
+            void grantNetworkBreak(Math.min(5, protection.breakMinutesCap)).finally(() => setBusy(false));
+          }}
+        />
+      ) : null}
+      {summary.action === 're-enable-seal' ? (
+        <Button
+          title="Re-enable the seal service"
+          variant="danger"
+          style={{ marginTop: 12 }}
+          onPress={() => void openSealSettings()}
+        />
+      ) : null}
+      {summary.canRelease && !protection?.sealed ? (
+        <Button
+          title="Release the network shield"
+          variant="ghost"
+          style={{ marginTop: 12 }}
+          disabled={busy}
+          onPress={() => {
+            setBusy(true);
+            void releaseNetworkShield().finally(() => setBusy(false));
+          }}
+        />
+      ) : null}
+      {protection?.sealGuidance && !protection.seal?.enforcing && protection.sealed ? (
+        <Card style={{ marginTop: 10 }}>
+          <Text style={styles.warn}>Seal layer: {protection.sealGuidance}</Text>
+          <Hairline />
+          <Row k="Battery exemption" v={guard?.battery ?? '—'} onPress={() => void LockdownNative.requestBatteryExemption().then(() => refreshProtection()).catch(() => undefined)} />
+          <Hairline />
+          <Row k="Autostart (OEM)" v="Open ›" onPress={() => void LockdownNative.openAutostartSettings().catch(() => undefined)} />
+        </Card>
+      ) : null}
+
+      {guard?.owner === 'granted' ? (
+        <Card style={{ marginTop: 12 }}>
+          <Text style={styles.linkT}>DEVICE-OWNER POLICY</Text>
+          <Text style={styles.linkS}>
+            These are managed by the school, not the student: Android keeps the
+            always-on tunnel up across reboot and blocks traffic while it is down,
+            and the VPN/automation settings can be locked. Turn them on deliberately
+            — they change what the student can reach in Settings.
+          </Text>
+          <Hairline />
+          <Row
+            k="Hide Settings → VPN while sealed"
+            v={protection?.lockVpnUi ? 'On' : 'Off'}
+            onPress={() => {
+              const next = !protection?.lockVpnUi;
+              void setNetworkShield(protection?.mode === 'strict' ? 'strict' : 'apps', true, next);
+            }}
+          />
+          <Hairline />
+          <Row
+            k="No other accessibility service"
+            v="Apply ›"
+            onPress={() => void setAccessibilityAllowlist(true)}
+          />
+        </Card>
+      ) : null}
+
       <Label style={{ marginTop: 22, marginBottom: 10 }}>Device owner · kiosk</Label>
       <Card>
         <View style={[styles.linkRow, { borderColor: guard?.owner === 'granted' ? colors.mint : colors.crimson }]}>
@@ -233,6 +416,13 @@ export default function Settings() {
       <Button title="Sign out of this device" variant="ghost" onPress={signOut} style={{ marginTop: 22 }} />
     </ScrollView>
   );
+}
+
+function sealLabel(p: { seal?: { enforcing: boolean; listedInSettings: boolean; boundInProcess: boolean; liveAgeSeconds: number } } | null): string {
+  if (!p?.seal) return 'unavailable';
+  if (p.seal.enforcing) return 'Bound and receiving events';
+  if (p.seal.listedInSettings && !p.seal.boundInProcess) return 'Listed but killed by the device';
+  return 'OFF — enable it in Accessibility';
 }
 
 function Row({ k, v, onPress }: { k: string; v: string; onPress?: () => void }) {

@@ -14,6 +14,7 @@ const COPY: Record<ViolationType, string> = {
   emergency_unlock: 'Emergency unlock',
   accessibility_off: 'Service disabled',
   admin_disabled: 'Device admin removed',
+  network_shield_off: 'Network shield disabled',
   heartbeat_miss: 'Heartbeat lost',
 };
 

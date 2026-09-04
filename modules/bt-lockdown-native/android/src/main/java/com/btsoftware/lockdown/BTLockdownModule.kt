@@ -205,6 +205,10 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     map.putString("kiosk", if (LockTaskController.isDeviceOwner(ctx) && isLockTaskActive()) "granted" else "denied")
     map.putString("miui", if (isMiui()) "detected" else "none")
     map.putString("notifications", "pending")
+    // Informational: the network shield is an extra layer, never a precondition
+    // for arming a session (a phone without its consent must still be sealable).
+    map.putString("network", NetworkProtectionManager.mode(ctx))
+    map.putString("protection", NetworkProtectionManager.protectionLevel(ctx))
     promise.resolve(map)
   }
 
@@ -297,6 +301,10 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
       .putBoolean("adminActive", isAdminActive())
       .apply()
     LockdownOverlayService.start(ctx)
+    // Fresh session: reset the per-session network-shield bookkeeping (breaks
+    // used, blocked-for ceiling timer, retry backoff) and engage both layers.
+    NetworkProtectionManager.onSessionArmed(ctx)
+    LockdownOverlayService.enforceNow(ctx)
     // Show the corner countdown for the session's remaining time even if the
     // full-screen barrier is not currently raised (e.g. student is in a safe app).
     val endsAt = parseIsoSafe(payload.getString("endsAt"))
@@ -331,6 +339,7 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
     ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
       .edit().putBoolean("active", false).apply()
     LockdownOverlayService.cornerOff(ctx)
+    NetworkProtectionManager.release(ctx, "js-disarm")
     LockdownOverlayService.stop(ctx)
     // Release kiosk mode at session end.
     currentActivity?.let { LockTaskController.unpin(it) }
@@ -341,8 +350,128 @@ class BTLockdownModule(private val ctx: ReactApplicationContext) :
   @ReactMethod
   fun startBackgroundGuard(promise: Promise) {
     LockdownOverlayService.startIdle(ctx)
+    LockdownOverlayService.enforceNow(ctx)
     promise.resolve(true)
   }
+
+  // ----------------------------------------------------------------
+  // Network shield (third enforcement layer) + seal health
+  // ----------------------------------------------------------------
+
+  /**
+   * Everything the UI needs to tell the truth about protection: shield mode,
+   * verified enforcement state, why it is not enforcing, and the seal layer's
+   * health (bound / listed / why it last dropped).
+   */
+  @ReactMethod
+  fun getProtectionStatus(promise: Promise) {
+    val map = Arguments.createMap()
+    NetworkProtectionManager.snapshot(ctx).forEach { (k, v) -> put(map, k, v) }
+    val a11y = Arguments.createMap()
+    AccessibilityHealth.snapshot(ctx).forEach { (k, v) -> put(a11y, k, v) }
+    map.putMap("seal", a11y)
+    map.putString("sealGuidance", AccessibilityHealth.guidance(ctx))
+    map.putString("protection", NetworkProtectionManager.protectionLevel(ctx))
+    promise.resolve(map)
+  }
+
+  /**
+   * Arm the shield. `mode`: off | apps | strict.
+   *
+   * `consent` must be true (the on-screen explanation was accepted) unless the
+   * device is school-provisioned device owner, where the institution supplies
+   * the policy. Enabling it also needs the one-time system VPN allowance, so
+   * when that is missing we launch the system dialog and report the state back —
+   * the caller shows "tap Allow, then it is live" instead of pretending.
+   */
+  @ReactMethod
+  fun setNetworkShield(mode: String, consent: Boolean, lockVpnUi: Boolean, promise: Promise) {
+    val state = NetworkProtectionManager.setMode(ctx, mode, consent, lockVpnUi)
+    if (mode != NetworkProtectionManager.MODE_OFF && !NetworkProtectionManager.isVpnPrepared(ctx) &&
+      !LockTaskController.isDeviceOwner(ctx)
+    ) {
+      requestVpnConsentInternal()
+    }
+    val map = Arguments.createMap()
+    NetworkProtectionManager.snapshot(ctx).forEach { (k, v) -> put(map, k, v) }
+    map.putString("state", state)
+    promise.resolve(map)
+  }
+
+  /** Launch the system "BT LOCKDOWN will start a VPN" dialog if still needed. */
+  @ReactMethod
+  fun requestNetworkShieldConsent(promise: Promise) {
+    val already = NetworkProtectionManager.isVpnPrepared(ctx) ||
+      LockTaskController.isDeviceOwner(ctx)
+    if (!already) requestVpnConsentInternal()
+    promise.resolve(already)
+  }
+
+  private fun requestVpnConsentInternal() {
+    val i = NetworkProtectionManager.vpnPrepareIntent(ctx) ?: return
+    try {
+      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      ctx.startActivity(i)
+    } catch (_: Throwable) { }
+  }
+
+  /** Bounded network-only break. The seal itself stays up. */
+  @ReactMethod
+  fun grantNetworkBreak(minutes: Double, promise: Promise) {
+    promise.resolve(NetworkProtectionManager.grantBreak(ctx, minutes.toInt()))
+  }
+
+  /**
+   * Local release of the shield. Only honoured while NO session is sealed: the
+   * network block is the institution's policy for the duration of Deep Work, so
+   * the way out of an active session is the timetable / the teacher ending it,
+   * not a button in the app.
+   */
+  @ReactMethod
+  fun releaseNetworkShield(promise: Promise) {
+    val sealed = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("active", false)
+    if (sealed) {
+      promise.resolve(false)
+      return
+    }
+    NetworkProtectionManager.release(ctx, "manual")
+    promise.resolve(true)
+  }
+
+  /**
+   * Device-owner only: restrict accessibility services to BT LOCKDOWN's own, so
+   * an installed "tap the toggle for me" automation app cannot be enabled.
+   * Does NOT (and cannot) stop the student turning our seal off in Settings —
+   * nothing an app may do can — and is offered as an explicit school policy.
+   */
+  @ReactMethod
+  fun setAccessibilityAllowlist(enabled: Boolean, promise: Promise) {
+    val ok = if (enabled) {
+      AccessibilityHealth.applyAccessibilityAllowlist(ctx)
+    } else {
+      AccessibilityHealth.clearAccessibilityAllowlist(ctx)
+    }
+    promise.resolve(ok)
+  }
+
+  /** Open the system seal settings so a parent / teacher can re-enable it. */
+  @ReactMethod
+  fun openSealSettings(promise: Promise) {
+    AccessibilityHealth.openAccessibilitySettings(ctx)
+    promise.resolve(true)
+  }
+
+  private fun put(map: com.facebook.react.bridge.WritableMap, key: String, value: Any?) {
+    when (value) {
+      null -> map.putNull(key)
+      is Boolean -> map.putBoolean(key, value)
+      is Int -> map.putInt(key, value)
+      is Double -> map.putDouble(key, value)
+      is Long -> map.putDouble(key, value.toDouble())
+      else -> map.putString(key, value.toString())
+    }
+  }
+
 
   /** Show the corner countdown chip counting down to targetAt (epoch ms). */
   @ReactMethod

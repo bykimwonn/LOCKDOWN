@@ -7,8 +7,8 @@ import type { ViolationType } from '@/src/types';
  *
  *  - blocked app:       1st = warning, 2nd = -10, 3rd+ = -25 + streak broken
  *  - force quit / emergency unlock: -25 + streak broken
- *  - permission revoked / accessibility off / admin removed / clock tamper:
- *                       -50 + streak broken
+ *  - permission revoked / accessibility off / admin removed / clock tamper /
+ *    network shield disabled: -50 + streak broken
  *  - heartbeat miss:    local only, never scored
  */
 export interface Penalty {
@@ -29,6 +29,9 @@ export function penaltyFor(type: ViolationType, blockCount: number): Penalty {
   if (
     type === 'accessibility_off' ||
     type === 'admin_disabled' ||
+    // Deliberately disabling the second layer counts the same as disabling the
+    // first one: it is the same act of will, on the same device, mid-session.
+    type === 'network_shield_off' ||
     type === 'permission_revoked' ||
     type === 'time_tamper'
   ) {

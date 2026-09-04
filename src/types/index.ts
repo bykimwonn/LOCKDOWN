@@ -17,6 +17,7 @@ export type ViolationType =
   | 'emergency_unlock'
   | 'accessibility_off'
   | 'admin_disabled'
+  | 'network_shield_off'
   | 'heartbeat_miss';
 
 export type AppCategory = 'social' | 'games' | 'entertainment' | 'browsers' | 'other';

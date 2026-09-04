@@ -1,6 +1,7 @@
 import { DeviceEventEmitter, NativeModules, Platform } from 'react-native';
 import { getApiBase, getToken } from '@/src/config';
 import type { PermissionStatus, ShieldApp } from '@/src/types';
+import type { ProtectionStatus, ShieldMode } from '@/src/services/protection';
 
 type NativeLockdown = {
   requestScreenTimeAuthorization: () => Promise<boolean>;
@@ -11,6 +12,13 @@ type NativeLockdown = {
   openAutostartSettings: () => Promise<boolean>;
   isSamsungDevice: () => Promise<boolean>;
   startBackgroundGuard: () => Promise<boolean>;
+  getProtectionStatus: () => Promise<ProtectionStatus>;
+  setNetworkShield: (mode: string, consent: boolean, lockVpnUi: boolean) => Promise<ProtectionStatus & { state: string }>;
+  requestNetworkShieldConsent: () => Promise<boolean>;
+  grantNetworkBreak: (minutes: number) => Promise<boolean>;
+  releaseNetworkShield: () => Promise<boolean>;
+  setAccessibilityAllowlist: (enabled: boolean) => Promise<boolean>;
+  openSealSettings: () => Promise<boolean>;
   showCornerTimer: (targetAt: number) => Promise<boolean>;
   hideCornerTimer: () => Promise<boolean>;
   enterKiosk: () => Promise<boolean>;
@@ -52,6 +60,10 @@ export type DeviceGuard = {
   owner: 'granted' | 'denied' | 'unavailable';
   /** True when the device is currently pinned in lock-task / kiosk mode. */
   kiosk: 'granted' | 'denied' | 'unavailable';
+  /** Network shield mode: 'off' | 'apps' | 'strict'. Informational only. */
+  network: ShieldMode | 'unavailable';
+  /** What the health controller verified across BOTH layers. */
+  protection: 'FULL' | 'SEAL_ONLY' | 'NETWORK_ONLY' | 'DEGRADED' | 'IDLE' | 'unknown';
   miui: 'detected' | 'none';
   notifications: string;
 };
@@ -63,10 +75,17 @@ export type NativeLockdownEvent = {
     | 'serverInactive'
     | 'unauthorized'
     | 'accessibilityOff'
+    | 'a11yRestored'
     | 'adminDisabled'
     | 'overlayDenied'
-    | 'heartbeatLost';
+    | 'heartbeatLost'
+    | 'netProtectActive'
+    | 'netProtectDegraded'
+    | 'netProtectDown'
+    | 'netRevoked'
+    | 'netShieldOff';
   app?: string;
+  reason?: string;
 };
 
 const LINKED: Partial<NativeLockdown> | undefined = NativeModules.BTLockdownModule;
@@ -86,6 +105,8 @@ function defaultGuard(): DeviceGuard {
     admin: 'unavailable',
     owner: 'unavailable',
     kiosk: 'unavailable',
+    network: 'unavailable',
+    protection: 'unknown',
     miui: 'none',
     notifications: 'pending',
   };
@@ -174,6 +195,60 @@ export const LockdownNative = {
 
   async hideCornerTimer() {
     if (LINKED?.hideCornerTimer) return LINKED.hideCornerTimer();
+    return false;
+  },
+
+  // ----------------------------------------------------------------
+  // Network shield (third layer) + seal health
+  // ----------------------------------------------------------------
+
+  /** Verified state of both enforcement layers. */
+  async getProtectionStatus(): Promise<ProtectionStatus | null> {
+    if (Platform.OS !== 'android' || !LINKED?.getProtectionStatus) return null;
+    return LINKED.getProtectionStatus().catch(() => null);
+  },
+
+  /**
+   * Arm the network shield.
+   * @param consent true only after the on-screen explanation was accepted; on a
+   *   school device-owner device the institution's policy is the authority.
+   * @param lockVpnUi device-owner only: also hide Settings → VPN while sealed, so
+   *   the shield cannot be disconnected there. Opt-in, cleared at session end.
+   */
+  async setNetworkShield(mode: ShieldMode, consent: boolean, lockVpnUi = false) {
+    if (LINKED?.setNetworkShield) {
+      return LINKED.setNetworkShield(mode, consent, lockVpnUi).catch(() => null);
+    }
+    return null;
+  },
+
+  /** Launch the system VPN allowance dialog if it has not been answered. */
+  async requestNetworkShieldConsent() {
+    if (LINKED?.requestNetworkShieldConsent) return LINKED.requestNetworkShieldConsent().catch(() => false);
+    return false;
+  },
+
+  /** Bounded internet-only break during a sealed session (seal stays up). */
+  async grantNetworkBreak(minutes: number) {
+    if (LINKED?.grantNetworkBreak) return LINKED.grantNetworkBreak(minutes).catch(() => false);
+    return false;
+  },
+
+  /** Switch the shield off. Refused natively while a session is sealed. */
+  async releaseNetworkShield() {
+    if (LINKED?.releaseNetworkShield) return LINKED.releaseNetworkShield().catch(() => false);
+    return false;
+  },
+
+  /** Device-owner only: permit no other accessibility service but ours. */
+  async setAccessibilityAllowlist(enabled: boolean) {
+    if (LINKED?.setAccessibilityAllowlist) return LINKED.setAccessibilityAllowlist(enabled).catch(() => false);
+    return false;
+  },
+
+  /** Open Settings → Accessibility so a parent/teacher can restore the seal. */
+  async openSealSettings() {
+    if (LINKED?.openSealSettings) return LINKED.openSealSettings().catch(() => false);
     return false;
   },
 
